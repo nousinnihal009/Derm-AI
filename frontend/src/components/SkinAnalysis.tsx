@@ -49,15 +49,25 @@ const SkinAnalysis: React.FC<Props> = ({ onAnalysisComplete }) => {
     if (!file) return;
     setIsAnalyzing(true);
     setError('');
+    setCurrentStep(0);
 
-    // Simulate step progression
-    for (let i = 0; i < ANALYSIS_STEPS.length; i++) {
-      setCurrentStep(i);
-      await new Promise(r => setTimeout(r, i === 2 ? 500 : 300));
-    }
+    // Run animation and API call concurrently
+    const stepAnimation = async () => {
+      for (let i = 0; i < ANALYSIS_STEPS.length; i++) {
+        setCurrentStep(i);
+        await new Promise(r => setTimeout(r, i === 2 ? 800 : 400));
+      }
+    };
+
+    const apiCall = analyzeSkin(file);
 
     try {
-      const result = await analyzeSkin(file);
+      // Wait for both animation and API call to complete
+      const [result] = await Promise.all([apiCall, stepAnimation()]);
+      // Mark all steps as done
+      setCurrentStep(ANALYSIS_STEPS.length);
+      // Small delay to show "all done" state
+      await new Promise(r => setTimeout(r, 300));
       onAnalysisComplete(result, preview!);
     } catch (err: any) {
       setError(err.message || 'Analysis failed. Please try again.');
@@ -164,6 +174,22 @@ const SkinAnalysis: React.FC<Props> = ({ onAnalysisComplete }) => {
               </div>
             ))}
           </div>
+
+          {error && (
+            <div style={{
+              marginTop: '20px', padding: '14px 16px', borderRadius: '10px',
+              background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.2)', color: '#fb7185',
+            }}>
+              {error}
+              <button
+                className="btn-secondary"
+                onClick={() => { setIsAnalyzing(false); setCurrentStep(-1); setError(''); }}
+                style={{ marginTop: '12px', width: '100%' }}
+              >
+                Try Again
+              </button>
+            </div>
+          )}
         </div>
       )}
 
