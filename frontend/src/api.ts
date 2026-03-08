@@ -68,12 +68,18 @@ export async function searchDoctors(params: {
 
 // ── Environment ──────────────────────────────────────────
 export async function getEnvironmentRisks(params: {
+  city?: string;
+  lat?: number;
+  lon?: number;
   uv_index?: number;
   humidity?: number;
   pollution_aqi?: number;
   temperature?: number;
 } = {}) {
   const query = new URLSearchParams();
+  if (params.city) query.set('city', params.city);
+  if (params.lat !== undefined) query.set('lat', String(params.lat));
+  if (params.lon !== undefined) query.set('lon', String(params.lon));
   if (params.uv_index !== undefined) query.set('uv_index', String(params.uv_index));
   if (params.humidity !== undefined) query.set('humidity', String(params.humidity));
   if (params.pollution_aqi !== undefined) query.set('pollution_aqi', String(params.pollution_aqi));

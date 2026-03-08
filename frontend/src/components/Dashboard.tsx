@@ -16,6 +16,9 @@ interface HistoryEntry {
 const Dashboard: React.FC<Props> = ({ onNavigate }) => {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [envRisks, setEnvRisks] = useState<any>(null);
+  const [envLoading, setEnvLoading] = useState(false);
+  const [envCity, setEnvCity] = useState('New York');
+  const [envSource, setEnvSource] = useState('');
 
   useEffect(() => {
     // Load history from localStorage
@@ -24,11 +27,21 @@ const Dashboard: React.FC<Props> = ({ onNavigate }) => {
       setHistory(h);
     } catch { setHistory([]); }
 
-    // Fetch environment risks
-    getEnvironmentRisks({ uv_index: 7, humidity: 45, pollution_aqi: 65, temperature: 28 })
-      .then(setEnvRisks)
-      .catch(() => {});
+    // Fetch environment risks for default city
+    fetchEnvRisks('New York');
   }, []);
+
+  const fetchEnvRisks = async (city: string) => {
+    setEnvLoading(true);
+    try {
+      const data = await getEnvironmentRisks({ city });
+      setEnvRisks(data);
+      setEnvSource(data.data_source || 'unknown');
+    } catch {
+      setEnvRisks(null);
+    }
+    setEnvLoading(false);
+  };
 
   const totalScans = history.length;
   const avgConfidence = totalScans > 0 ? Math.round(history.reduce((s, h) => s + h.confidence, 0) / totalScans) : 0;
@@ -79,7 +92,44 @@ const Dashboard: React.FC<Props> = ({ onNavigate }) => {
           <h3 style={{ color: 'white', fontWeight: 700, marginBottom: '16px', fontSize: '1.1rem' }}>
             🌍 Environmental Skin Risks
           </h3>
-          {envRisks?.risks ? (
+
+          {/* City search */}
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+            <input
+              className="input-field"
+              placeholder="Enter city name..."
+              value={envCity}
+              onChange={e => setEnvCity(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && fetchEnvRisks(envCity)}
+              style={{ flex: 1, padding: '10px 14px', fontSize: '0.9rem' }}
+              id="env-city-input"
+            />
+            <button
+              className="btn-primary"
+              onClick={() => fetchEnvRisks(envCity)}
+              disabled={envLoading}
+              style={{ padding: '10px 16px', fontSize: '0.85rem', flexShrink: 0 }}
+              id="env-city-search"
+            >
+              {envLoading ? '...' : '🔍'}
+            </button>
+          </div>
+
+          {envSource === 'live' && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '6px',
+              marginBottom: '12px', fontSize: '0.75rem', color: 'var(--accent-emerald)',
+            }}>
+              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--accent-emerald)', display: 'inline-block' }} />
+              Live data from Open-Meteo
+            </div>
+          )}
+
+          {envLoading ? (
+            <div style={{ textAlign: 'center', padding: '20px' }}>
+              <div className="spinner" style={{ margin: '0 auto', width: '28px', height: '28px' }} />
+            </div>
+          ) : envRisks?.risks ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {envRisks.risks.map((risk: any, i: number) => (
                 <div key={i} style={{
@@ -101,7 +151,7 @@ const Dashboard: React.FC<Props> = ({ onNavigate }) => {
               <p style={{ color: 'var(--dark-300)', fontSize: '0.8rem', marginTop: '4px' }}>{envRisks.overall}</p>
             </div>
           ) : (
-            <p style={{ color: 'var(--dark-300)' }}>Loading environment data...</p>
+            <p style={{ color: 'var(--dark-300)' }}>Enter a city to check environmental skin risks.</p>
           )}
         </div>
 
