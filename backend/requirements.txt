@@ -11,3 +11,6 @@ pyyaml
 python-multipart
 aiofiles
 httpx
+reportlab
+PyJWT
+bcrypt

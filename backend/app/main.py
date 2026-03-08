@@ -21,17 +21,17 @@ from app.routes.health import router as health_router
 async def lifespan(app: FastAPI):
     """Startup/shutdown events."""
     # Startup: preload model
-    print("🚀 Starting SkinCare AI Backend...")
+    print("[*] Starting SkinCare AI Backend...")
     try:
         from app.models.prediction import load_model
         load_model()
-        print("✅ ML Model loaded successfully")
+        print("[OK] ML Model loaded successfully")
     except Exception as e:
-        print(f"⚠️ Model loading failed: {e}")
+        print(f"[WARN] Model loading failed: {e}")
         print("   Backend will start but /api/analyze will not work until model is available.")
     yield
     # Shutdown
-    print("👋 Shutting down SkinCare AI Backend...")
+    print("[*] Shutting down SkinCare AI Backend...")
 
 
 app = FastAPI(
