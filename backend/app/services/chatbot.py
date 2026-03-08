@@ -1,9 +1,11 @@
 """
 chatbot.py
 
-AI Dermatologist Chatbot — rule-based Q&A system using the dermatology knowledge base.
+AI Dermatologist Chatbot — rule-based Q&A system with fuzzy matching
+using the dermatology knowledge base.
 """
 
+from difflib import get_close_matches
 from app.services.knowledge_base import CONDITION_DATABASE, INGREDIENT_DATABASE, check_ingredient_safety
 
 # ─────────────────────────────────────────────────────────────
@@ -169,8 +171,194 @@ GENERAL_QA = {
             "- Alcohol-based toners"
         )
     },
+    "oily_skin": {
+        "keywords": ["oily skin", "oily face", "excess oil", "shiny skin", "greasy skin", "sebum"],
+        "response": (
+            "**Oily Skin Care Guide:**\n\n"
+            "**Daily routine:**\n"
+            "1. Gentle foaming/gel cleanser (AM & PM)\n"
+            "2. Niacinamide 10% serum — regulates sebum production\n"
+            "3. Lightweight gel or water-cream moisturizer\n"
+            "4. Oil-free SPF 50 or mineral sunscreen\n\n"
+            "**Key ingredients:**\n"
+            "- Niacinamide — sebum regulation, pore minimizing\n"
+            "- Salicylic acid (BHA) — penetrates and clears pores\n"
+            "- Zinc — anti-inflammatory, controls oil\n"
+            "- Clay masks — absorb excess oil (1-2x/week)\n\n"
+            "**Common mistakes:**\n"
+            "- Over-cleansing (strips oil → skin produces MORE)\n"
+            "- Skipping moisturizer (dehydration ≠ oily)\n"
+            "- Using harsh/drying products\n\n"
+            "💡 **Tip:** Oily skin ages slower due to natural lipid protection. Embrace it!"
+        )
+    },
+    "sensitive_skin": {
+        "keywords": ["sensitive skin", "skin irritation", "redness", "burning", "stinging", "reactive skin"],
+        "response": (
+            "**Sensitive Skin Care Guide:**\n\n"
+            "**Golden rules:**\n"
+            "1. Patch test EVERY new product (behind ear or inner forearm, 48 hours)\n"
+            "2. Introduce ONE product at a time (wait 2 weeks)\n"
+            "3. Keep routine MINIMAL (fewer products = fewer reactions)\n\n"
+            "**Safe ingredients:**\n"
+            "- Centella asiatica (cica) — soothing\n"
+            "- Ceramides — barrier repair\n"
+            "- Panthenol (vitamin B5) — calming\n"
+            "- Colloidal oatmeal — anti-itch, protective\n"
+            "- Aloe vera — cooling, hydrating\n\n"
+            "**AVOID:**\n"
+            "- Fragrance/parfum (top allergen)\n"
+            "- Essential oils\n"
+            "- Alcohol denat (drying)\n"
+            "- SLS/SLES surfactants\n"
+            "- High-concentration actives\n\n"
+            "⚠️ If your skin is suddenly sensitive, it may be a damaged barrier. Simplify routine to cleanser + moisturizer + SPF for 4-6 weeks."
+        )
+    },
+    "anti_aging": {
+        "keywords": ["anti aging", "anti-aging", "wrinkles", "fine lines", "aging skin", "look younger"],
+        "response": (
+            "**Evidence-Based Anti-Aging Guide:**\n\n"
+            "**The Big 3 (proven by research):**\n"
+            "1. **Sunscreen SPF 50+** — prevents 80% of visible aging\n"
+            "2. **Retinoids** — stimulate collagen, reduce wrinkles\n"
+            "3. **Vitamin C** — antioxidant, brightening, collagen boost\n\n"
+            "**Supporting players:**\n"
+            "- Peptides — signal collagen production\n"
+            "- Hyaluronic acid — plumping hydration\n"
+            "- Niacinamide — improves elasticity\n"
+            "- AHAs (glycolic/lactic acid) — gentle resurfacing\n\n"
+            "**Lifestyle factors:**\n"
+            "- Sleep 7-9 hours (skin repairs overnight)\n"
+            "- Don't smoke (accelerates aging 10+ years)\n"
+            "- Reduce sugar (glycation damages collagen)\n"
+            "- Stay hydrated\n"
+            "- Manage stress\n\n"
+            "**Professional treatments:**\n"
+            "- Microneedling — stimulates collagen\n"
+            "- Chemical peels — resurfacing\n"
+            "- Botox — prevents dynamic wrinkles\n"
+            "- Laser treatments — collagen remodeling\n\n"
+            "💡 **Prevention > Treatment.** Start sunscreen early, add retinol in your late 20s."
+        )
+    },
+    "skincare_routine": {
+        "keywords": ["skincare routine", "skin routine", "how to start skincare", "basic routine", "beginner skincare", "what products"],
+        "response": (
+            "**Beginner Skincare Routine:**\n\n"
+            "**Morning (3 steps):**\n"
+            "1. **Cleanser** — Gentle, pH-balanced (5.5)\n"
+            "2. **Moisturizer** — Matches your skin type\n"
+            "3. **Sunscreen SPF 30-50** — Non-negotiable!\n\n"
+            "**Evening (3 steps):**\n"
+            "1. **Cleanser** — Remove sunscreen/makeup (double cleanse if needed)\n"
+            "2. **Treatment** — Active (retinol, vitamin C, or niacinamide)\n"
+            "3. **Moisturizer** — Slightly richer than AM\n\n"
+            "**When to add products:**\n"
+            "- Start with the basics for 4 weeks\n"
+            "- Add ONE active at a time\n"
+            "- Wait 2 weeks between new products\n"
+            "- Listen to your skin\n\n"
+            "**By skin type:**\n"
+            "- Oily → gel cleanser, lightweight moisturizer\n"
+            "- Dry → cream cleanser, rich moisturizer\n"
+            "- Sensitive → fragrance-free everything\n"
+            "- Combination → different products for different zones"
+        )
+    },
+    "psoriasis": {
+        "keywords": ["psoriasis", "psoriatic", "scaly patches", "plaque psoriasis", "scalp psoriasis"],
+        "response": (
+            "**Psoriasis Guide:**\n\n"
+            "Psoriasis is a chronic autoimmune condition where skin cells grow too fast (3-4 days vs. 28-30 days normally).\n\n"
+            "**Types:**\n"
+            "- **Plaque** (most common, 80%) — thick, red, silvery patches\n"
+            "- **Guttate** — small drop-shaped spots, often triggered by strep\n"
+            "- **Inverse** — smooth red patches in skin folds\n"
+            "- **Pustular** — pus-filled bumps\n"
+            "- **Erythrodermic** — widespread, red, life-threatening (rare)\n\n"
+            "**Treatment options:**\n"
+            "- **Mild:** topical steroids, vitamin D analogs, coal tar\n"
+            "- **Moderate:** phototherapy (UVB), methotrexate\n"
+            "- **Severe:** biologics (adalimumab, secukinumab, etc.)\n\n"
+            "**Important:**\n"
+            "- Psoriasis is NOT contagious\n"
+            "- 30% of patients develop psoriatic arthritis — watch for joint pain\n"
+            "- Higher risk of cardiovascular disease\n"
+            "- Stress is a major trigger\n\n"
+            "⚠️ See a dermatologist for proper diagnosis and management plan."
+        )
+    },
+    "fungal": {
+        "keywords": ["fungal", "ringworm", "athlete's foot", "jock itch", "fungal infection", "tinea", "yeast infection"],
+        "response": (
+            "**Fungal Skin Infections Guide:**\n\n"
+            "**Common types:**\n"
+            "- **Tinea corporis** (ringworm) — ring-shaped rash\n"
+            "- **Tinea pedis** (athlete's foot) — itchy, flaking feet\n"
+            "- **Tinea cruris** (jock itch) — groin area\n"
+            "- **Tinea capitis** (scalp) — requires ORAL treatment\n"
+            "- **Candidiasis** — yeast in warm, moist skin folds\n\n"
+            "**Treatment:**\n"
+            "- OTC: clotrimazole or terbinafine cream (2-4 weeks)\n"
+            "- Apply antifungal BEYOND rash edges\n"
+            "- Continue 1-2 weeks AFTER rash clears\n"
+            "- Keep area clean and DRY\n\n"
+            "**Prevention:**\n"
+            "- Wear breathable fabrics\n"
+            "- Change socks daily\n"
+            "- Don't share towels/clothing\n"
+            "- Dry thoroughly after showers\n"
+            "- Treat pets if they're the source\n\n"
+            "⚠️ See a doctor if: covers large area, involves scalp/nails, or doesn't improve after 2 weeks."
+        )
+    },
+    "dark_spots": {
+        "keywords": ["dark spots", "hyperpigmentation", "melasma", "dark marks", "sun spots", "age spots", "brown spots"],
+        "response": (
+            "**Dark Spots / Hyperpigmentation Guide:**\n\n"
+            "**Types:**\n"
+            "- **PIH** (Post-Inflammatory) — after acne, injury\n"
+            "- **Melasma** — hormonal, patches on cheeks/forehead\n"
+            "- **Sun spots** — from UV damage\n\n"
+            "**Best ingredients (ranked by evidence):**\n"
+            "1. **Sunscreen SPF 50** — THE most important (prevents new/worsening spots)\n"
+            "2. **Vitamin C 15-20%** — antioxidant + melanin inhibitor\n"
+            "3. **Niacinamide 10%** — blocks melanin transfer\n"
+            "4. **Azelaic acid 15-20%** — safe in pregnancy\n"
+            "5. **Alpha arbutin** — gentle alternative to hydroquinone\n"
+            "6. **Retinoids** — accelerate cell turnover\n"
+            "7. **Tranexamic acid** — especially effective for melasma\n\n"
+            "**Timeline:** Expect 3-6 months for noticeable improvement.\n\n"
+            "⚠️ **Critical:** Without daily SPF 50+, NO brightening treatment will work. UV constantly triggers new pigment."
+        )
+    },
+    "scarring": {
+        "keywords": ["scar", "scarring", "acne scars", "skin scar", "scar treatment", "remove scar"],
+        "response": (
+            "**Scar Treatment Guide:**\n\n"
+            "**Types of acne scars:**\n"
+            "- **Ice pick** — deep, narrow holes\n"
+            "- **Boxcar** — wide, rectangular depressions\n"
+            "- **Rolling** — wave-like undulations\n"
+            "- **Hypertrophic/keloid** — raised, thickened scars\n\n"
+            "**At-home treatments:**\n"
+            "- Retinol/tretinoin — improves texture over months\n"
+            "- Vitamin C — supports collagen\n"
+            "- AHA exfoliants — gentle resurfacing\n"
+            "- Silicone sheets/gel — for raised scars\n"
+            "- SPF 50 — prevents scar darkening\n\n"
+            "**Professional treatments:**\n"
+            "- **Microneedling** — best for rollling/boxcar scars\n"
+            "- **Fractional laser** — powerful resurfacing\n"
+            "- **TCA CROSS** — for ice pick scars\n"
+            "- **Subcision** — releases tethered scars\n"
+            "- **Dermal fillers** — temporary volume for depressed scars\n\n"
+            "💡 OTC products help with discoloration but cannot fix textural scars. Professional treatments are the gold standard."
+        )
+    },
     "greeting": {
-        "keywords": ["hello", "hi", "hey", "help", "what can you do"],
+        "keywords": ["hello", "hi", "hey", "help", "what can you do", "what do you know"],
         "response": (
             "Hello! 👋 I'm your AI Dermatology Assistant. I can help you with:\n\n"
             "🔬 **Skin conditions** — Information about acne, eczema, psoriasis, skin cancer, and more\n"
@@ -182,18 +370,39 @@ GENERAL_QA = {
             "Just ask me a question! For example:\n"
             "- \"Is melanoma dangerous?\"\n"
             "- \"What treatments exist for eczema?\"\n"
-            "- \"Should I see a doctor?\"\n\n"
+            "- \"Should I see a doctor?\"\n"
+            "- \"How to treat dark spots?\"\n"
+            "- \"What's a good beginner skincare routine?\"\n\n"
             "⚠️ *I'm an AI assistant, not a doctor. Always consult a healthcare professional for medical advice.*"
         )
     }
 }
 
 
+def _fuzzy_match_condition(text: str) -> str | None:
+    """Try to fuzzy-match a user query to a condition in the database."""
+    text_lower = text.lower()
+
+    # Build list of all matchable names
+    names = []
+    for class_name, info in CONDITION_DATABASE.items():
+        names.append(class_name.lower())
+        names.append(info["display_name"].lower())
+
+    matches = get_close_matches(text_lower, names, n=1, cutoff=0.5)
+    if matches:
+        matched = matches[0]
+        for class_name, info in CONDITION_DATABASE.items():
+            if matched == class_name.lower() or matched == info["display_name"].lower():
+                return class_name
+    return None
+
+
 def get_chatbot_response(message: str) -> dict:
     """Generate a chatbot response based on the user's message."""
     msg_lower = message.lower().strip()
 
-    # Check general Q&A first
+    # Check general Q&A first (keyword matching with scoring)
     best_match = None
     best_score = 0
     for qa_id, qa in GENERAL_QA.items():
@@ -211,34 +420,22 @@ def get_chatbot_response(message: str) -> dict:
             "disclaimer": "This information is for educational purposes only and not a substitute for professional medical advice."
         }
 
-    # Check if asking about a specific condition
+    # Check if asking about a specific condition (exact match)
     for class_name, info in CONDITION_DATABASE.items():
         display_lower = info["display_name"].lower()
         class_lower = class_name.lower()
         if class_lower in msg_lower or display_lower in msg_lower:
-            response = (
-                f"**{info['display_name']}**\n\n"
-                f"{info['description']}\n\n"
-                f"**Severity:** {info['severity'].title()}\n"
-                f"**Risk Level:** {info['risk_level'].title()}\n\n"
-                f"**Common causes:** {', '.join(info['causes'][:3])}\n\n"
-                f"**Symptoms:** {', '.join(info['symptoms'][:4])}\n\n"
-                f"**When to see a doctor:** {info['when_to_see_doctor']}\n\n"
-            )
-            if info.get("is_cancerous"):
-                response += "⚠️ **This is a form of skin cancer. Please seek immediate medical evaluation.**\n"
+            return _build_condition_response(class_name, info)
 
-            return {
-                "response": response,
-                "type": "condition_info",
-                "condition": class_name,
-                "disclaimer": "This information is for educational purposes only and not a substitute for professional medical advice."
-            }
+    # Fuzzy match for conditions
+    fuzzy_match = _fuzzy_match_condition(msg_lower)
+    if fuzzy_match:
+        info = CONDITION_DATABASE[fuzzy_match]
+        return _build_condition_response(fuzzy_match, info)
 
     # Check if asking about an ingredient
-    ingredient_keywords = ["ingredient", "safe", "harmful", "contain", "chemical"]
+    ingredient_keywords = ["ingredient", "safe", "harmful", "contain", "chemical", "is it safe", "can i use"]
     if any(kw in msg_lower for kw in ingredient_keywords):
-        # Try to extract ingredient names
         for ing_name in INGREDIENT_DATABASE.keys():
             if ing_name in msg_lower:
                 info = check_ingredient_safety(ing_name)
@@ -255,17 +452,69 @@ def get_chatbot_response(message: str) -> dict:
                     "disclaimer": "Consult INCIDecoder.com or a dermatologist for comprehensive ingredient analysis."
                 }
 
-    # Default response
+    # Check for treatment-related questions
+    treatment_keywords = ["treatment", "treat", "cure", "heal", "remedy", "medicine", "medication", "how to get rid"]
+    if any(kw in msg_lower for kw in treatment_keywords):
+        # Try to find a condition in the message
+        for class_name, info in CONDITION_DATABASE.items():
+            display_lower = info["display_name"].lower()
+            # Check partial matches
+            display_words = display_lower.split()
+            if any(word in msg_lower for word in display_words if len(word) > 3):
+                treatments = info.get("treatments", {})
+                response = f"**Treatment Options for {info['display_name']}:**\n\n"
+                if treatments.get("otc"):
+                    response += "**Over-the-Counter:**\n" + "\n".join(f"- {t}" for t in treatments["otc"]) + "\n\n"
+                if treatments.get("prescription"):
+                    response += "**Prescription:**\n" + "\n".join(f"- {t}" for t in treatments["prescription"]) + "\n\n"
+                if treatments.get("natural"):
+                    response += "**Natural/Supportive:**\n" + "\n".join(f"- {t}" for t in treatments["natural"]) + "\n\n"
+                response += f"**When to see a doctor:** {info.get('when_to_see_doctor', 'Consult a dermatologist for persistent concerns.')}"
+                return {
+                    "response": response,
+                    "type": "treatment_info",
+                    "disclaimer": "Never self-medicate. Always consult a healthcare professional before starting any treatment."
+                }
+
+    # Default response with helpful suggestions
     return {
         "response": (
             "I'm not sure I understand that question. Here are some things I can help with:\n\n"
-            "- **Skin conditions**: Ask about acne, eczema, melanoma, psoriasis, etc.\n"
+            "- **Skin conditions**: Ask about acne, eczema, melanoma, psoriasis, rosacea, fungal infections, etc.\n"
             "- **Treatments**: \"What treatments exist for [condition]?\"\n"
             "- **When to see a doctor**: \"Should I see a doctor?\"\n"
             "- **Ingredients**: \"Is [ingredient name] safe?\"\n"
-            "- **Skincare**: \"How do I care for dry/oily skin?\"\n\n"
+            "- **Skincare**: \"How do I care for dry/oily skin?\"\n"
+            "- **Anti-aging**: \"What are the best anti-aging ingredients?\"\n"
+            "- **Dark spots**: \"How to treat hyperpigmentation?\"\n"
+            "- **Routines**: \"What is a good beginner skincare routine?\"\n\n"
             "Try rephrasing your question or ask about a specific condition!"
         ),
         "type": "fallback",
         "disclaimer": "I'm an AI assistant. For medical concerns, please consult a healthcare professional."
+    }
+
+
+def _build_condition_response(class_name: str, info: dict) -> dict:
+    """Build a formatted response for a skin condition."""
+    response = (
+        f"**{info['display_name']}**\n\n"
+        f"{info['description']}\n\n"
+        f"**Severity:** {info['severity'].title()}\n"
+        f"**Risk Level:** {info['risk_level'].title()}\n\n"
+    )
+    if info.get("causes"):
+        response += f"**Common causes:** {', '.join(info['causes'][:4])}\n\n"
+    if info.get("symptoms"):
+        response += f"**Symptoms:** {', '.join(info['symptoms'][:4])}\n\n"
+    response += f"**When to see a doctor:** {info['when_to_see_doctor']}\n\n"
+
+    if info.get("is_cancerous"):
+        response += "⚠️ **This is a form of skin cancer. Please seek immediate medical evaluation.**\n"
+
+    return {
+        "response": response,
+        "type": "condition_info",
+        "condition": class_name,
+        "disclaimer": "This information is for educational purposes only and not a substitute for professional medical advice."
     }
