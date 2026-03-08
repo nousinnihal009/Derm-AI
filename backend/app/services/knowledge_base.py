@@ -735,6 +735,18 @@ INGREDIENT_DATABASE = {
     "phthalates": {"safety": "harmful", "description": "Used as plasticizers and in synthetic fragrances. Known endocrine disruptors linked to reproductive issues.", "acne_risk": False, "allergen_risk": False},
     "alpha arbutin": {"safety": "safe", "description": "Effective skin-brightening derivative of hydroquinone. Much safer alternative for treating hyperpigmentation.", "acne_risk": False, "allergen_risk": False},
     "allantoin": {"safety": "safe", "description": "Highly effective soothing and skin-conditioning agent extracted from the comfrey plant.", "acne_risk": False, "allergen_risk": False},
+    "adapalene": {"safety": "safe", "description": "Retinoid (Differin) now available OTC. Excellent for acne with less irritation than tretinoin. Apply at night.", "acne_risk": False, "allergen_risk": False},
+    "clindamycin": {"safety": "safe", "description": "Topical antibiotic prescribed for acne. Usually paired with benzoyl peroxide to prevent resistance.", "acne_risk": False, "allergen_risk": False},
+    "kojic acid": {"safety": "safe", "description": "Natural skin lightener derived from fungi. Effective for hyperpigmentation but can irritate sensitive skin.", "acne_risk": False, "allergen_risk": True},
+    "tranexamic acid": {"safety": "safe", "description": "Melanin inhibitor especially effective for melasma. Available topically (3-5%) or orally (prescription).", "acne_risk": False, "allergen_risk": False},
+    "mandelic acid": {"safety": "safe", "description": "Gentle AHA derived from almonds. Larger molecular size means slower penetration and less irritation. Good for sensitive skin.", "acne_risk": False, "allergen_risk": False},
+    "urea": {"safety": "safe", "description": "Natural moisturizing factor. At 5-10% it's a humectant; at 20-40% it's keratolytic (exfoliating). Excellent for very dry skin.", "acne_risk": False, "allergen_risk": False},
+    "colloidal oatmeal": {"safety": "safe", "description": "FDA-recognized skin protectant. Anti-itch, anti-inflammatory. Ideal for eczema, dermatitis, and sensitive skin.", "acne_risk": False, "allergen_risk": False},
+    "snail mucin": {"safety": "safe", "description": "Contains glycoproteins, hyaluronic acid, and glycolic acid. Hydrating, soothing, and promotes wound healing.", "acne_risk": False, "allergen_risk": False},
+    "aloe vera": {"safety": "safe", "description": "Natural soothing and hydrating plant extract. Anti-inflammatory. Some people can be allergic — patch test first.", "acne_risk": False, "allergen_risk": False},
+    "argan oil": {"safety": "safe", "description": "Non-comedogenic plant oil rich in vitamin E and fatty acids. Good for dry and mature skin.", "acne_risk": False, "allergen_risk": False},
+    "vitamin e": {"safety": "safe", "description": "Antioxidant (tocopherol) that protects against UV damage. Can be comedogenic for some. Works best with vitamin C.", "acne_risk": True, "allergen_risk": False},
+    "tocopherol": {"safety": "safe", "description": "Natural form of vitamin E. Antioxidant that helps stabilize formulations and protect skin from free radicals.", "acne_risk": False, "allergen_risk": False},
 }
 
 
