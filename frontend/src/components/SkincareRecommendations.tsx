@@ -5,6 +5,9 @@
 
 import React, { useState } from 'react'
 import { useForm, FormProvider, Controller } from 'react-hook-form'
+import { useMutation } from '@tanstack/react-query'
+import axiosInstance from '../lib/axios'
+import { useLocation } from '../hooks/useLocation'
 import type { AnalysisResult } from '../App'
 import type {
   RoutineRequest,
@@ -77,10 +80,15 @@ interface Props {
 
 const SkincareRecommendations: React.FC<Props> = ({ result }) => {
   const [currentStep, setCurrentStep] = useState(1)
-  const [routineResponse, setRoutineResponse] = useState<RoutineResponse | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [submittedRequest, setSubmittedRequest] = useState<RoutineRequest | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: (payload: RoutineRequest) =>
+      axiosInstance
+        .post<RoutineResponse>('/api/skincare-routine', payload)
+        .then((r) => r.data),
+    onError: () => {}, // error handled via mutation.isError inline
+  })
 
   const methods = useForm<RoutineRequest>({
     defaultValues: {
@@ -116,42 +124,20 @@ const SkincareRecommendations: React.FC<Props> = ({ result }) => {
   }
 
   // ── Submit ──────────────────────────────────────────────
-  const onSubmit = async (data: RoutineRequest) => {
-    setLoading(true)
-    setError(null)
+  const onSubmit = (data: RoutineRequest) => {
     setSubmittedRequest(data)
-
-    try {
-      const res = await fetch(`${API_BASE}/api/skincare-routine`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.detail || 'Failed to generate routine')
-      }
-
-      const response: RoutineResponse = await res.json()
-      setRoutineResponse(response)
-    } catch (e: any) {
-      setError(e.message || 'Something went wrong. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    mutation.mutate(data)
   }
 
   const resetWizard = () => {
-    setRoutineResponse(null)
+    mutation.reset()
     setSubmittedRequest(null)
     setCurrentStep(1)
-    setError(null)
     methods.reset()
   }
 
   // ── If routine generated, show results ──────────────────
-  if (routineResponse) {
+  if (mutation.isSuccess && mutation.data) {
     return (
       <div className="page-container" style={{ maxWidth: '1000px', margin: '0 auto' }}>
         <div className="page-header">
@@ -162,7 +148,7 @@ const SkincareRecommendations: React.FC<Props> = ({ result }) => {
         </div>
 
         <RoutineDisplay
-          response={routineResponse}
+          response={mutation.data}
           pollutionExposure={submittedRequest?.pollution_exposure ?? false}
         />
 
@@ -259,7 +245,7 @@ const SkincareRecommendations: React.FC<Props> = ({ result }) => {
           </div>
 
           {/* ── Error Display ── */}
-          {error && (
+          {mutation.isError && (
             <div
               style={{
                 marginTop: '16px',
@@ -271,7 +257,7 @@ const SkincareRecommendations: React.FC<Props> = ({ result }) => {
                 fontSize: '0.9rem',
               }}
             >
-              ⚠️ {error}
+              ⚠️ {(mutation.error as any)?.response?.data?.detail || mutation.error?.message || 'Something went wrong. Please try again.'}
             </div>
           )}
 
@@ -311,14 +297,14 @@ const SkincareRecommendations: React.FC<Props> = ({ result }) => {
               <button
                 type="submit"
                 className="btn-primary"
-                disabled={loading}
+                disabled={mutation.isPending}
                 style={{
                   padding: '12px 32px',
-                  opacity: loading ? 0.7 : 1,
-                  cursor: loading ? 'wait' : 'pointer',
+                  opacity: mutation.isPending ? 0.7 : 1,
+                  cursor: mutation.isPending ? 'wait' : 'pointer',
                 }}
               >
-                {loading ? (
+                {mutation.isPending ? (
                   <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span className="spinner" style={{ width: '16px', height: '16px' }} />
                     Generating…
@@ -630,37 +616,21 @@ const Step4Environment: React.FC = () => {
   const methods = useFormContextSafe()
   const includeWeekly = methods.watch('include_weekly') ?? true
   const location = methods.watch('location')
-  const [locationLoading, setLocationLoading] = useState(false)
-  const [locationError, setLocationError] = useState<string | null>(null)
+  const { state: locState, coords, request: requestLocation } = useLocation()
 
-  const requestLocation = () => {
-    if (!navigator.geolocation) {
-      setLocationError('Geolocation is not supported by your browser.')
-      return
+  React.useEffect(() => {
+    if (locState.status === 'resolved' && coords) {
+      methods.setValue('location', coords, { shouldValidate: true })
     }
-    setLocationLoading(true)
-    setLocationError(null)
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        methods.setValue(
-          'location',
-          { lat: pos.coords.latitude, lon: pos.coords.longitude },
-          { shouldValidate: true }
-        )
-        setLocationLoading(false)
-      },
-      (err) => {
-        setLocationError('Unable to get your location. Weather adjustments will be skipped.')
-        setLocationLoading(false)
-      },
-      { timeout: 10000 }
-    )
-  }
+  }, [locState.status, coords, methods])
 
   const clearLocation = () => {
     methods.setValue('location', null, { shouldValidate: true })
   }
+
+  const isLoading = locState.status === 'loading'
+  const isDenied = locState.status === 'denied'
+  const isUnavailable = locState.status === 'unavailable'
 
   return (
     <div className="space-y-6">
@@ -717,17 +687,29 @@ const Step4Environment: React.FC = () => {
             <button
               type="button"
               onClick={requestLocation}
-              disabled={locationLoading}
+              disabled={isLoading}
               className="btn-primary"
               style={{ padding: '8px 16px', fontSize: '0.8rem' }}
             >
-              {locationLoading ? 'Detecting…' : 'Enable'}
+              {isLoading ? (
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span className="spinner" style={{ width: '12px', height: '12px' }} />
+                  Detecting...
+                </span>
+              ) : (
+                'Enable'
+              )}
             </button>
           )}
         </div>
-        {locationError && (
+        {isDenied && (
           <p style={{ color: '#fca5a5', fontSize: '0.8rem', marginTop: '8px' }}>
-            {locationError}
+            Location access denied. Please enable it in your browser settings.
+          </p>
+        )}
+        {isUnavailable && (
+          <p style={{ color: '#fca5a5', fontSize: '0.8rem', marginTop: '8px' }}>
+            Geolocation is unavailable. Weather adjustments will be skipped.
           </p>
         )}
       </div>
