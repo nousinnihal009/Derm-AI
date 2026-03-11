@@ -1,20 +1,11 @@
 """
-chat.py — AI Dermatologist Chatbot API
+chat.py — AI Dermatologist Chatbot API Router
+
+This module re-exports the router from the chatbot service module,
+which now contains the full LLM-powered agent with SSE streaming,
+tool calling, and session management.
 """
 
-from fastapi import APIRouter
-from pydantic import BaseModel
-from app.services.chatbot import get_chatbot_response
+from app.services.chatbot import router
 
-router = APIRouter(prefix="/api", tags=["chat"])
-
-
-class ChatMessage(BaseModel):
-    message: str
-
-
-@router.post("/chat")
-async def chat(payload: ChatMessage):
-    """AI Dermatologist chatbot endpoint."""
-    response = get_chatbot_response(payload.message)
-    return response
+__all__ = ["router"]
