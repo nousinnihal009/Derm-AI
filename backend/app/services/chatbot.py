@@ -36,6 +36,10 @@ from app.routes.auth import verify_token
 logger = logging.getLogger("dermai.chatbot")
 
 # ─── OpenAI client ──────────────────────────────────────────────────
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
@@ -758,14 +762,18 @@ async def stream_chat_response(
         # --- Main streaming loop (may iterate if tool calls occur) ---
         max_tool_rounds = 5
         for _round in range(max_tool_rounds):
-            stream = await openai_client.chat.completions.create(
-                model=GPT_MODEL,
-                messages=messages,
-                tools=TOOL_SCHEMAS,
-                stream=True,
-                temperature=0.7,
-                max_tokens=2000,
-            )
+            try:
+                stream = await openai_client.chat.completions.create(
+                    model=GPT_MODEL,
+                    messages=messages,
+                    tools=TOOL_SCHEMAS,
+                    stream=True,
+                    temperature=0.7,
+                    max_tokens=2000,
+                )
+            except Exception as e:
+                logger.error(f"[DermAI] OpenAI call failed: {type(e).__name__}: {e}")
+                raise e
 
             current_content = ""
             tool_calls_in_round: dict[int, dict[str, Any]] = {}
