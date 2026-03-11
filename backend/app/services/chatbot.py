@@ -1,520 +1,1001 @@
 """
-chatbot.py
+chatbot.py — Stateful, Tool-Augmented LLM Agent for DermAI
 
-AI Dermatologist Chatbot — rule-based Q&A system with fuzzy matching
-using the dermatology knowledge base.
+Organized into clearly separated sections:
+  1. Pydantic Schemas
+  2. Redis Helpers
+  3. Tool Definitions
+  4. Tool Dispatcher
+  5. LLM Orchestrator
+  6. SSE Generator
+  7. FastAPI Router
 """
 
-from difflib import get_close_matches
-from app.services.knowledge_base import CONDITION_DATABASE, INGREDIENT_DATABASE, check_ingredient_safety
+from __future__ import annotations
 
-# ─────────────────────────────────────────────────────────────
-# Pre-built Q&A Knowledge
-# ─────────────────────────────────────────────────────────────
+import json
+import logging
+import os
+import time
+import uuid
+from enum import Enum
+from typing import Any, AsyncGenerator, Optional
 
-GENERAL_QA = {
-    "melanoma": {
-        "keywords": ["melanoma", "melanoma dangerous", "deadliest skin cancer", "most dangerous"],
-        "response": (
-            "**Melanoma** is the most dangerous form of skin cancer. It develops from melanocytes (pigment cells) and can "
-            "metastasize to other organs if not caught early.\n\n"
-            "**Key facts:**\n"
-            "- 5-year survival rate: **99% if localized** (Stage I), drops to **30% if metastasized**\n"
-            "- Use the **ABCDE rule** to check moles: Asymmetry, Border irregularity, Color variation, Diameter >6mm, Evolving\n"
-            "- Risk factors: intense UV exposure, fair skin, >50 moles, family history\n\n"
-            "⚠️ **If you suspect melanoma, see a dermatologist IMMEDIATELY.** Early detection saves lives."
-        )
-    },
-    "eczema_treatment": {
-        "keywords": ["treatment for eczema", "eczema treatment", "treat eczema", "cure eczema", "help eczema"],
-        "response": (
-            "**Eczema (Atopic Dermatitis) Treatment:**\n\n"
-            "**Daily Management:**\n"
-            "- Moisturize **immediately after bathing** (within 3 minutes)\n"
-            "- Use thick, fragrance-free creams (CeraVe, Vanicream, Eucerin)\n"
-            "- Take short lukewarm showers (<10 min)\n"
-            "- Use gentle, fragrance-free cleansers\n\n"
-            "**Flare Treatments:**\n"
-            "- OTC: 1% hydrocortisone cream (max 2 weeks)\n"
-            "- Prescription: Topical corticosteroids, tacrolimus, pimecrolimus\n"
-            "- Severe cases: Dupilumab (Dupixent) biologic therapy\n\n"
-            "**Lifestyle:**\n"
-            "- Identify and avoid triggers (stress, allergens, irritants)\n"
-            "- Wear soft cotton clothing\n"
-            "- Use a humidifier in dry weather\n\n"
-            "⚠️ Eczema has no cure, but can be well-managed. See a dermatologist if OTC treatments aren't enough."
-        )
-    },
-    "see_doctor": {
-        "keywords": ["should i see a doctor", "when to see doctor", "see a dermatologist", "need doctor", "should i go to doctor"],
-        "response": (
-            "**When to See a Dermatologist:**\n\n"
-            "🔴 **Immediately if:**\n"
-            "- A mole is changing (ABCDE criteria)\n"
-            "- A sore that won't heal\n"
-            "- A rapidly growing lesion\n"
-            "- Signs of skin infection (spreading redness, warmth, pus, fever)\n\n"
-            "🟡 **Soon if:**\n"
-            "- Persistent rash >2 weeks\n"
-            "- Severe acne causing scarring\n"
-            "- Widespread skin condition\n"
-            "- OTC treatments aren't working after 6-8 weeks\n\n"
-            "🟢 **Routine (schedule when convenient):**\n"
-            "- Annual skin cancer screening (especially if >50 moles or family history)\n"
-            "- Mild cosmetic concerns\n"
-            "- New skincare routine guidance\n\n"
-            "💡 **Tip:** Many dermatologists now offer teledermatology (video consultations) for initial assessments."
-        )
-    },
-    "sunscreen": {
-        "keywords": ["sunscreen", "spf", "sun protection", "uv protection", "sunblock"],
-        "response": (
-            "**Sunscreen Guide:**\n\n"
-            "- Use **SPF 30 minimum** (SPF 50 recommended for daily use)\n"
-            "- Choose **broad-spectrum** (protects against UVA + UVB)\n"
-            "- Apply **1/4 teaspoon for face** (most people under-apply)\n"
-            "- Reapply **every 2 hours** outdoors, or after swimming/sweating\n\n"
-            "**Types:**\n"
-            "- **Mineral** (zinc oxide, titanium dioxide): Best for sensitive/acne-prone skin\n"
-            "- **Chemical** (avobenzone, octinoxate): More cosmetically elegant, lighter feel\n\n"
-            "**Key facts:**\n"
-            "- UV damage is the #1 cause of premature aging\n"
-            "- Up to 80% of UV rays penetrate clouds\n"
-            "- SPF only measures UVB protection — look for broad-spectrum\n"
-            "- Sunscreen is the **single most important anti-aging product**"
-        )
-    },
-    "acne": {
-        "keywords": ["acne", "pimple", "breakout", "zits", "acne treatment"],
-        "response": (
-            "**Acne Treatment Guide:**\n\n"
-            "**Mild Acne (blackheads, whiteheads):**\n"
-            "- Salicylic acid 2% cleanser\n"
-            "- Adapalene 0.1% gel (Differin — now OTC)\n"
-            "- Benzoyl peroxide 2.5% spot treatment\n\n"
-            "**Moderate Acne (papules, pustules):**\n"
-            "- Add benzoyl peroxide wash\n"
-            "- Consider prescription retinoid\n"
-            "- Topical antibiotics (clindamycin)\n\n"
-            "**Severe/Cystic Acne:**\n"
-            "- See a dermatologist — may need isotretinoin (Accutane)\n"
-            "- Cortisone injections for painful cysts\n"
-            "- Hormonal therapy (spironolactone for hormonal acne)\n\n"
-            "**Important tips:**\n"
-            "- Don't pick or pop — causes scarring\n"
-            "- Be patient — most treatments take 6-12 weeks\n"
-            "- Always use sunscreen with retinoids"
-        )
-    },
-    "skin_cancer": {
-        "keywords": ["skin cancer", "cancer", "cancerous", "malignant", "is it cancer"],
-        "response": (
-            "**Skin Cancer Overview:**\n\n"
-            "**Three main types:**\n"
-            "1. **Basal Cell Carcinoma (BCC)** — Most common, slowest growing, rarely spreads\n"
-            "2. **Squamous Cell Carcinoma (SCC)** — Can metastasize if neglected\n"
-            "3. **Melanoma** — Most dangerous, can be fatal if not caught early\n\n"
-            "**Warning signs (ABCDE rule for moles):**\n"
-            "- **A**symmetry — one half doesn't match the other\n"
-            "- **B**order — irregular, ragged, or blurred edges\n"
-            "- **C**olor — uneven color (brown, black, red, white, blue)\n"
-            "- **D**iameter — larger than 6mm (pencil eraser)\n"
-            "- **E**volving — changing in size, shape, or color\n\n"
-            "**Prevention:**\n"
-            "- Daily SPF 50+ sunscreen\n"
-            "- Avoid tanning beds (increases melanoma risk by 75%)\n"
-            "- Wear protective clothing\n"
-            "- Monthly self-exams + annual dermatologist screening\n\n"
-            "⚠️ **Any suspicious lesion should be evaluated by a dermatologist ASAP.**"
-        )
-    },
-    "retinol": {
-        "keywords": ["retinol", "retinoid", "retin-a", "tretinoin", "vitamin a"],
-        "response": (
-            "**Retinol/Retinoid Guide:**\n\n"
-            "Retinoids are Vitamin A derivatives — the **gold standard** for anti-aging and acne.\n\n"
-            "**Strength hierarchy (weakest → strongest):**\n"
-            "1. Retinyl palmitate (very mild)\n"
-            "2. Retinol 0.3-1% (OTC)\n"
-            "3. Adapalene 0.1-0.3% (OTC/Rx)\n"
-            "4. Tretinoin 0.025-0.1% (prescription)\n"
-            "5. Tazarotene (strongest Rx)\n\n"
-            "**How to use:**\n"
-            "- Start LOW and SLOW (2x/week, increase gradually)\n"
-            "- Apply pea-sized amount to DRY skin at night\n"
-            "- Always use SPF 50+ during the day\n"
-            "- Expect initial 'purging' (weeks 2-6) — this is normal\n"
-            "- Results visible after 12-24 weeks\n\n"
-            "**Avoid with:** other exfoliants (AHA/BHA), vitamin C (use in AM instead), benzoyl peroxide"
-        )
-    },
-    "dry_skin": {
-        "keywords": ["dry skin", "dehydrated skin", "dry face", "flaky skin", "cracked skin"],
-        "response": (
-            "**Dry Skin Care Guide:**\n\n"
-            "**Hydrating routine:**\n"
-            "1. Gentle cream cleanser (no foaming/SLS)\n"
-            "2. Hyaluronic acid serum on DAMP skin\n"
-            "3. Rich moisturizer with ceramides\n"
-            "4. Facial oil to seal (squalane, jojoba)\n"
-            "5. SPF 30+ (cream-based, not alcohol-based)\n\n"
-            "**Key ingredients:**\n"
-            "- Hyaluronic acid — draws water to skin\n"
-            "- Ceramides — repair skin barrier\n"
-            "- Glycerin — humectant\n"
-            "- Squalane — lightweight oil\n"
-            "- Shea butter — rich emollient\n\n"
-            "**Avoid:**\n"
-            "- Harsh cleansers (SLS, SLES)\n"
-            "- Hot water (use lukewarm)\n"
-            "- Over-exfoliating\n"
-            "- Alcohol-based toners"
-        )
-    },
-    "oily_skin": {
-        "keywords": ["oily skin", "oily face", "excess oil", "shiny skin", "greasy skin", "sebum"],
-        "response": (
-            "**Oily Skin Care Guide:**\n\n"
-            "**Daily routine:**\n"
-            "1. Gentle foaming/gel cleanser (AM & PM)\n"
-            "2. Niacinamide 10% serum — regulates sebum production\n"
-            "3. Lightweight gel or water-cream moisturizer\n"
-            "4. Oil-free SPF 50 or mineral sunscreen\n\n"
-            "**Key ingredients:**\n"
-            "- Niacinamide — sebum regulation, pore minimizing\n"
-            "- Salicylic acid (BHA) — penetrates and clears pores\n"
-            "- Zinc — anti-inflammatory, controls oil\n"
-            "- Clay masks — absorb excess oil (1-2x/week)\n\n"
-            "**Common mistakes:**\n"
-            "- Over-cleansing (strips oil → skin produces MORE)\n"
-            "- Skipping moisturizer (dehydration ≠ oily)\n"
-            "- Using harsh/drying products\n\n"
-            "💡 **Tip:** Oily skin ages slower due to natural lipid protection. Embrace it!"
-        )
-    },
-    "sensitive_skin": {
-        "keywords": ["sensitive skin", "skin irritation", "redness", "burning", "stinging", "reactive skin"],
-        "response": (
-            "**Sensitive Skin Care Guide:**\n\n"
-            "**Golden rules:**\n"
-            "1. Patch test EVERY new product (behind ear or inner forearm, 48 hours)\n"
-            "2. Introduce ONE product at a time (wait 2 weeks)\n"
-            "3. Keep routine MINIMAL (fewer products = fewer reactions)\n\n"
-            "**Safe ingredients:**\n"
-            "- Centella asiatica (cica) — soothing\n"
-            "- Ceramides — barrier repair\n"
-            "- Panthenol (vitamin B5) — calming\n"
-            "- Colloidal oatmeal — anti-itch, protective\n"
-            "- Aloe vera — cooling, hydrating\n\n"
-            "**AVOID:**\n"
-            "- Fragrance/parfum (top allergen)\n"
-            "- Essential oils\n"
-            "- Alcohol denat (drying)\n"
-            "- SLS/SLES surfactants\n"
-            "- High-concentration actives\n\n"
-            "⚠️ If your skin is suddenly sensitive, it may be a damaged barrier. Simplify routine to cleanser + moisturizer + SPF for 4-6 weeks."
-        )
-    },
-    "anti_aging": {
-        "keywords": ["anti aging", "anti-aging", "wrinkles", "fine lines", "aging skin", "look younger"],
-        "response": (
-            "**Evidence-Based Anti-Aging Guide:**\n\n"
-            "**The Big 3 (proven by research):**\n"
-            "1. **Sunscreen SPF 50+** — prevents 80% of visible aging\n"
-            "2. **Retinoids** — stimulate collagen, reduce wrinkles\n"
-            "3. **Vitamin C** — antioxidant, brightening, collagen boost\n\n"
-            "**Supporting players:**\n"
-            "- Peptides — signal collagen production\n"
-            "- Hyaluronic acid — plumping hydration\n"
-            "- Niacinamide — improves elasticity\n"
-            "- AHAs (glycolic/lactic acid) — gentle resurfacing\n\n"
-            "**Lifestyle factors:**\n"
-            "- Sleep 7-9 hours (skin repairs overnight)\n"
-            "- Don't smoke (accelerates aging 10+ years)\n"
-            "- Reduce sugar (glycation damages collagen)\n"
-            "- Stay hydrated\n"
-            "- Manage stress\n\n"
-            "**Professional treatments:**\n"
-            "- Microneedling — stimulates collagen\n"
-            "- Chemical peels — resurfacing\n"
-            "- Botox — prevents dynamic wrinkles\n"
-            "- Laser treatments — collagen remodeling\n\n"
-            "💡 **Prevention > Treatment.** Start sunscreen early, add retinol in your late 20s."
-        )
-    },
-    "skincare_routine": {
-        "keywords": ["skincare routine", "skin routine", "how to start skincare", "basic routine", "beginner skincare", "what products"],
-        "response": (
-            "**Beginner Skincare Routine:**\n\n"
-            "**Morning (3 steps):**\n"
-            "1. **Cleanser** — Gentle, pH-balanced (5.5)\n"
-            "2. **Moisturizer** — Matches your skin type\n"
-            "3. **Sunscreen SPF 30-50** — Non-negotiable!\n\n"
-            "**Evening (3 steps):**\n"
-            "1. **Cleanser** — Remove sunscreen/makeup (double cleanse if needed)\n"
-            "2. **Treatment** — Active (retinol, vitamin C, or niacinamide)\n"
-            "3. **Moisturizer** — Slightly richer than AM\n\n"
-            "**When to add products:**\n"
-            "- Start with the basics for 4 weeks\n"
-            "- Add ONE active at a time\n"
-            "- Wait 2 weeks between new products\n"
-            "- Listen to your skin\n\n"
-            "**By skin type:**\n"
-            "- Oily → gel cleanser, lightweight moisturizer\n"
-            "- Dry → cream cleanser, rich moisturizer\n"
-            "- Sensitive → fragrance-free everything\n"
-            "- Combination → different products for different zones"
-        )
-    },
-    "psoriasis": {
-        "keywords": ["psoriasis", "psoriatic", "scaly patches", "plaque psoriasis", "scalp psoriasis"],
-        "response": (
-            "**Psoriasis Guide:**\n\n"
-            "Psoriasis is a chronic autoimmune condition where skin cells grow too fast (3-4 days vs. 28-30 days normally).\n\n"
-            "**Types:**\n"
-            "- **Plaque** (most common, 80%) — thick, red, silvery patches\n"
-            "- **Guttate** — small drop-shaped spots, often triggered by strep\n"
-            "- **Inverse** — smooth red patches in skin folds\n"
-            "- **Pustular** — pus-filled bumps\n"
-            "- **Erythrodermic** — widespread, red, life-threatening (rare)\n\n"
-            "**Treatment options:**\n"
-            "- **Mild:** topical steroids, vitamin D analogs, coal tar\n"
-            "- **Moderate:** phototherapy (UVB), methotrexate\n"
-            "- **Severe:** biologics (adalimumab, secukinumab, etc.)\n\n"
-            "**Important:**\n"
-            "- Psoriasis is NOT contagious\n"
-            "- 30% of patients develop psoriatic arthritis — watch for joint pain\n"
-            "- Higher risk of cardiovascular disease\n"
-            "- Stress is a major trigger\n\n"
-            "⚠️ See a dermatologist for proper diagnosis and management plan."
-        )
-    },
-    "fungal": {
-        "keywords": ["fungal", "ringworm", "athlete's foot", "jock itch", "fungal infection", "tinea", "yeast infection"],
-        "response": (
-            "**Fungal Skin Infections Guide:**\n\n"
-            "**Common types:**\n"
-            "- **Tinea corporis** (ringworm) — ring-shaped rash\n"
-            "- **Tinea pedis** (athlete's foot) — itchy, flaking feet\n"
-            "- **Tinea cruris** (jock itch) — groin area\n"
-            "- **Tinea capitis** (scalp) — requires ORAL treatment\n"
-            "- **Candidiasis** — yeast in warm, moist skin folds\n\n"
-            "**Treatment:**\n"
-            "- OTC: clotrimazole or terbinafine cream (2-4 weeks)\n"
-            "- Apply antifungal BEYOND rash edges\n"
-            "- Continue 1-2 weeks AFTER rash clears\n"
-            "- Keep area clean and DRY\n\n"
-            "**Prevention:**\n"
-            "- Wear breathable fabrics\n"
-            "- Change socks daily\n"
-            "- Don't share towels/clothing\n"
-            "- Dry thoroughly after showers\n"
-            "- Treat pets if they're the source\n\n"
-            "⚠️ See a doctor if: covers large area, involves scalp/nails, or doesn't improve after 2 weeks."
-        )
-    },
-    "dark_spots": {
-        "keywords": ["dark spots", "hyperpigmentation", "melasma", "dark marks", "sun spots", "age spots", "brown spots"],
-        "response": (
-            "**Dark Spots / Hyperpigmentation Guide:**\n\n"
-            "**Types:**\n"
-            "- **PIH** (Post-Inflammatory) — after acne, injury\n"
-            "- **Melasma** — hormonal, patches on cheeks/forehead\n"
-            "- **Sun spots** — from UV damage\n\n"
-            "**Best ingredients (ranked by evidence):**\n"
-            "1. **Sunscreen SPF 50** — THE most important (prevents new/worsening spots)\n"
-            "2. **Vitamin C 15-20%** — antioxidant + melanin inhibitor\n"
-            "3. **Niacinamide 10%** — blocks melanin transfer\n"
-            "4. **Azelaic acid 15-20%** — safe in pregnancy\n"
-            "5. **Alpha arbutin** — gentle alternative to hydroquinone\n"
-            "6. **Retinoids** — accelerate cell turnover\n"
-            "7. **Tranexamic acid** — especially effective for melasma\n\n"
-            "**Timeline:** Expect 3-6 months for noticeable improvement.\n\n"
-            "⚠️ **Critical:** Without daily SPF 50+, NO brightening treatment will work. UV constantly triggers new pigment."
-        )
-    },
-    "scarring": {
-        "keywords": ["scar", "scarring", "acne scars", "skin scar", "scar treatment", "remove scar"],
-        "response": (
-            "**Scar Treatment Guide:**\n\n"
-            "**Types of acne scars:**\n"
-            "- **Ice pick** — deep, narrow holes\n"
-            "- **Boxcar** — wide, rectangular depressions\n"
-            "- **Rolling** — wave-like undulations\n"
-            "- **Hypertrophic/keloid** — raised, thickened scars\n\n"
-            "**At-home treatments:**\n"
-            "- Retinol/tretinoin — improves texture over months\n"
-            "- Vitamin C — supports collagen\n"
-            "- AHA exfoliants — gentle resurfacing\n"
-            "- Silicone sheets/gel — for raised scars\n"
-            "- SPF 50 — prevents scar darkening\n\n"
-            "**Professional treatments:**\n"
-            "- **Microneedling** — best for rollling/boxcar scars\n"
-            "- **Fractional laser** — powerful resurfacing\n"
-            "- **TCA CROSS** — for ice pick scars\n"
-            "- **Subcision** — releases tethered scars\n"
-            "- **Dermal fillers** — temporary volume for depressed scars\n\n"
-            "💡 OTC products help with discoloration but cannot fix textural scars. Professional treatments are the gold standard."
-        )
-    },
-    "greeting": {
-        "keywords": ["hello", "hi", "hey", "help", "what can you do", "what do you know"],
-        "response": (
-            "Hello! 👋 I'm your AI Dermatology Assistant. I can help you with:\n\n"
-            "🔬 **Skin conditions** — Information about acne, eczema, psoriasis, skin cancer, and more\n"
-            "💊 **Treatments** — Treatment options for various skin conditions\n"
-            "🧴 **Skincare routines** — Personalized routine guidance\n"
-            "🧪 **Ingredient safety** — Check if skincare ingredients are safe\n"
-            "👨‍⚕️ **When to see a doctor** — Guidance on when to seek professional help\n"
-            "☀️ **Sun protection** — SPF and UV protection advice\n\n"
-            "Just ask me a question! For example:\n"
-            "- \"Is melanoma dangerous?\"\n"
-            "- \"What treatments exist for eczema?\"\n"
-            "- \"Should I see a doctor?\"\n"
-            "- \"How to treat dark spots?\"\n"
-            "- \"What's a good beginner skincare routine?\"\n\n"
-            "⚠️ *I'm an AI assistant, not a doctor. Always consult a healthcare professional for medical advice.*"
-        )
-    }
-}
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
+
+# ─── Services we consume (do not rewrite) ───────────────────────────
+from services.weather import get_weather_context, WeatherContext
+from services.vision import get_vision_risk_flag, RiskLevel
+
+# ─── Auth dependency (existing) ─────────────────────────────────────
+from app.routes.auth import verify_token
+
+logger = logging.getLogger("dermai.chatbot")
+
+# ─── OpenAI client ──────────────────────────────────────────────────
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+GPT_MODEL = "gpt-4o"
+GPT_MINI_MODEL = "gpt-4o-mini"
+
+# =====================================================================
+# 1. PYDANTIC SCHEMAS
+# =====================================================================
 
 
-def _fuzzy_match_condition(text: str) -> str | None:
-    """Try to fuzzy-match a user query to a condition in the database."""
-    text_lower = text.lower()
-
-    # Build list of all matchable names
-    names = []
-    for class_name, info in CONDITION_DATABASE.items():
-        names.append(class_name.lower())
-        names.append(info["display_name"].lower())
-
-    matches = get_close_matches(text_lower, names, n=1, cutoff=0.5)
-    if matches:
-        matched = matches[0]
-        for class_name, info in CONDITION_DATABASE.items():
-            if matched == class_name.lower() or matched == info["display_name"].lower():
-                return class_name
-    return None
+class LocationPayload(BaseModel):
+    lat: float
+    lon: float
 
 
-def get_chatbot_response(message: str) -> dict:
-    """Generate a chatbot response based on the user's message."""
-    msg_lower = message.lower().strip()
-
-    # Check general Q&A first (keyword matching with scoring)
-    best_match = None
-    best_score = 0
-    for qa_id, qa in GENERAL_QA.items():
-        for keyword in qa["keywords"]:
-            if keyword in msg_lower:
-                score = len(keyword)
-                if score > best_score:
-                    best_score = score
-                    best_match = qa
-
-    if best_match:
-        return {
-            "response": best_match["response"],
-            "type": "knowledge",
-            "disclaimer": "This information is for educational purposes only and not a substitute for professional medical advice."
-        }
-
-    # Check if asking about a specific condition (exact match)
-    for class_name, info in CONDITION_DATABASE.items():
-        display_lower = info["display_name"].lower()
-        class_lower = class_name.lower()
-        if class_lower in msg_lower or display_lower in msg_lower:
-            return _build_condition_response(class_name, info)
-
-    # Fuzzy match for conditions
-    fuzzy_match = _fuzzy_match_condition(msg_lower)
-    if fuzzy_match:
-        info = CONDITION_DATABASE[fuzzy_match]
-        return _build_condition_response(fuzzy_match, info)
-
-    # Check if asking about an ingredient
-    ingredient_keywords = ["ingredient", "safe", "harmful", "contain", "chemical", "is it safe", "can i use"]
-    if any(kw in msg_lower for kw in ingredient_keywords):
-        for ing_name in INGREDIENT_DATABASE.keys():
-            if ing_name in msg_lower:
-                info = check_ingredient_safety(ing_name)
-                safety_emoji = "✅" if info["safety"] == "safe" else "⚠️" if info["safety"] == "caution" else "🚫"
-                response = (
-                    f"{safety_emoji} **{ing_name.title()}** — Safety: **{info['safety'].title()}**\n\n"
-                    f"{info['description']}\n\n"
-                    f"- Acne risk: {'Yes' if info['acne_risk'] else 'No'}\n"
-                    f"- Allergen risk: {'Yes' if info['allergen_risk'] else 'No'}"
-                )
-                return {
-                    "response": response,
-                    "type": "ingredient_info",
-                    "disclaimer": "Consult INCIDecoder.com or a dermatologist for comprehensive ingredient analysis."
-                }
-
-    # Check for treatment-related questions
-    treatment_keywords = ["treatment", "treat", "cure", "heal", "remedy", "medicine", "medication", "how to get rid"]
-    if any(kw in msg_lower for kw in treatment_keywords):
-        # Try to find a condition in the message
-        for class_name, info in CONDITION_DATABASE.items():
-            display_lower = info["display_name"].lower()
-            # Check partial matches
-            display_words = display_lower.split()
-            if any(word in msg_lower for word in display_words if len(word) > 3):
-                treatments = info.get("treatments", {})
-                response = f"**Treatment Options for {info['display_name']}:**\n\n"
-                if treatments.get("otc"):
-                    response += "**Over-the-Counter:**\n" + "\n".join(f"- {t}" for t in treatments["otc"]) + "\n\n"
-                if treatments.get("prescription"):
-                    response += "**Prescription:**\n" + "\n".join(f"- {t}" for t in treatments["prescription"]) + "\n\n"
-                if treatments.get("natural"):
-                    response += "**Natural/Supportive:**\n" + "\n".join(f"- {t}" for t in treatments["natural"]) + "\n\n"
-                response += f"**When to see a doctor:** {info.get('when_to_see_doctor', 'Consult a dermatologist for persistent concerns.')}"
-                return {
-                    "response": response,
-                    "type": "treatment_info",
-                    "disclaimer": "Never self-medicate. Always consult a healthcare professional before starting any treatment."
-                }
-
-    # Default response with helpful suggestions
-    return {
-        "response": (
-            "I'm not sure I understand that question. Here are some things I can help with:\n\n"
-            "- **Skin conditions**: Ask about acne, eczema, melanoma, psoriasis, rosacea, fungal infections, etc.\n"
-            "- **Treatments**: \"What treatments exist for [condition]?\"\n"
-            "- **When to see a doctor**: \"Should I see a doctor?\"\n"
-            "- **Ingredients**: \"Is [ingredient name] safe?\"\n"
-            "- **Skincare**: \"How do I care for dry/oily skin?\"\n"
-            "- **Anti-aging**: \"What are the best anti-aging ingredients?\"\n"
-            "- **Dark spots**: \"How to treat hyperpigmentation?\"\n"
-            "- **Routines**: \"What is a good beginner skincare routine?\"\n\n"
-            "Try rephrasing your question or ask about a specific condition!"
-        ),
-        "type": "fallback",
-        "disclaimer": "I'm an AI assistant. For medical concerns, please consult a healthcare professional."
-    }
+class ChatMessageRequest(BaseModel):
+    session_id: str = Field(description="Client-generated UUID for the conversation")
+    message: str = Field(min_length=1, max_length=4000)
+    location: Optional[LocationPayload] = None
+    image_id: Optional[str] = None
 
 
-def _build_condition_response(class_name: str, info: dict) -> dict:
-    """Build a formatted response for a skin condition."""
-    response = (
-        f"**{info['display_name']}**\n\n"
-        f"{info['description']}\n\n"
-        f"**Severity:** {info['severity'].title()}\n"
-        f"**Risk Level:** {info['risk_level'].title()}\n\n"
+class RoutineStep(BaseModel):
+    step: int
+    action: str
+    ingredient_target: str
+    notes: str
+
+
+class SkincareRoutineOutput(BaseModel):
+    am_routine: list[RoutineStep]
+    pm_routine: list[RoutineStep]
+    weekly_treatments: list[RoutineStep]
+
+
+class SSETextDelta(BaseModel):
+    type: str = "text_delta"
+    content: str
+
+
+class SSEToolCall(BaseModel):
+    type: str = "tool_call"
+    tool_name: str
+    status: str  # "running" | "complete" | "failed"
+
+
+class SSEStructuredRoutine(BaseModel):
+    type: str = "structured_routine"
+    payload: dict[str, Any]
+
+
+class SSESuggestionChips(BaseModel):
+    type: str = "suggestion_chips"
+    chips: list[str]
+
+
+class SSEDone(BaseModel):
+    type: str = "done"
+
+
+class SSEError(BaseModel):
+    type: str = "error"
+    message: str
+
+
+class SessionInfo(BaseModel):
+    session_id: str
+    created_at: Optional[str] = None
+    message_count: int = 0
+
+
+class ToolExecutionError(Exception):
+    """Raised when a tool execution fails with a user-friendly message."""
+    pass
+
+
+# =====================================================================
+# 2. REDIS HELPERS
+# =====================================================================
+
+# We try to use redis.asyncio. If Redis is unavailable we fall back to
+# a process-local dict so the app doesn't crash.
+
+_in_memory_store: dict[str, Any] = {}
+_in_memory_sessions: dict[str, set[str]] = {}
+_rate_limit_counters: dict[str, list[float]] = {}
+
+try:
+    import redis.asyncio as aioredis
+
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    _redis_pool: Optional[aioredis.Redis] = aioredis.from_url(
+        REDIS_URL, decode_responses=True
     )
-    if info.get("causes"):
-        response += f"**Common causes:** {', '.join(info['causes'][:4])}\n\n"
-    if info.get("symptoms"):
-        response += f"**Symptoms:** {', '.join(info['symptoms'][:4])}\n\n"
-    response += f"**When to see a doctor:** {info['when_to_see_doctor']}\n\n"
+except Exception:
+    _redis_pool = None
+    logger.warning("Redis unavailable — falling back to in-memory session store.")
 
-    if info.get("is_cancerous"):
-        response += "⚠️ **This is a form of skin cancer. Please seek immediate medical evaluation.**\n"
 
-    return {
-        "response": response,
-        "type": "condition_info",
-        "condition": class_name,
-        "disclaimer": "This information is for educational purposes only and not a substitute for professional medical advice."
+def _chat_key(user_id: str, session_id: str) -> str:
+    return f"dermai:chat:{user_id}:{session_id}"
+
+
+def _sessions_key(user_id: str) -> str:
+    return f"dermai:sessions:{user_id}"
+
+
+def _rate_key(user_id: str) -> str:
+    return f"dermai:rate:{user_id}"
+
+
+HISTORY_TTL_SECONDS = 86400  # 24 hours
+MAX_PAIRS = 20  # maximum message pairs to keep
+RATE_LIMIT_RPM = 30  # requests per minute
+
+
+async def _redis_available() -> bool:
+    if _redis_pool is None:
+        return False
+    try:
+        await _redis_pool.ping()
+        return True
+    except Exception:
+        return False
+
+
+async def load_history(user_id: str, session_id: str) -> list[dict[str, str]]:
+    """Load conversation history from Redis or in-memory fallback."""
+    key = _chat_key(user_id, session_id)
+    if await _redis_available():
+        assert _redis_pool is not None
+        raw = await _redis_pool.get(key)
+        if raw:
+            return json.loads(raw)
+        return []
+    return _in_memory_store.get(key, [])
+
+
+async def save_history(
+    user_id: str, session_id: str, history: list[dict[str, str]]
+) -> None:
+    """Persist conversation history, trimming to MAX_PAIRS oldest messages."""
+    # Keep system prompt + last MAX_PAIRS*2 messages
+    system_msgs = [m for m in history if m.get("role") == "system"]
+    non_system = [m for m in history if m.get("role") != "system"]
+    if len(non_system) > MAX_PAIRS * 2:
+        non_system = non_system[-(MAX_PAIRS * 2) :]
+    trimmed = system_msgs + non_system
+
+    key = _chat_key(user_id, session_id)
+    if await _redis_available():
+        assert _redis_pool is not None
+        await _redis_pool.set(key, json.dumps(trimmed), ex=HISTORY_TTL_SECONDS)
+        await _redis_pool.sadd(_sessions_key(user_id), session_id)
+        await _redis_pool.expire(_sessions_key(user_id), HISTORY_TTL_SECONDS)
+    else:
+        _in_memory_store[key] = trimmed
+        _in_memory_sessions.setdefault(user_id, set()).add(session_id)
+
+
+async def delete_session(user_id: str, session_id: str) -> bool:
+    """Delete a chat session. Returns True if something was deleted."""
+    key = _chat_key(user_id, session_id)
+    if await _redis_available():
+        assert _redis_pool is not None
+        deleted = await _redis_pool.delete(key)
+        await _redis_pool.srem(_sessions_key(user_id), session_id)
+        return deleted > 0
+    existed = key in _in_memory_store
+    _in_memory_store.pop(key, None)
+    _in_memory_sessions.get(user_id, set()).discard(session_id)
+    return existed
+
+
+async def list_sessions(user_id: str) -> list[str]:
+    """List all session IDs for a user."""
+    if await _redis_available():
+        assert _redis_pool is not None
+        members = await _redis_pool.smembers(_sessions_key(user_id))
+        return list(members)
+    return list(_in_memory_sessions.get(user_id, set()))
+
+
+async def check_rate_limit(user_id: str) -> bool:
+    """
+    Returns True if the request should be BLOCKED (rate limit exceeded).
+    Enforces RATE_LIMIT_RPM requests per minute per user.
+    """
+    now = time.time()
+    window_start = now - 60.0
+
+    if await _redis_available():
+        assert _redis_pool is not None
+        rkey = _rate_key(user_id)
+        pipe = _redis_pool.pipeline()
+        await pipe.zremrangebyscore(rkey, 0, window_start)
+        await pipe.zadd(rkey, {str(now): now})
+        await pipe.zcard(rkey)
+        await pipe.expire(rkey, 120)
+        results = await pipe.execute()
+        count = results[2]
+        return count > RATE_LIMIT_RPM
+    else:
+        entries = _rate_limit_counters.get(user_id, [])
+        entries = [t for t in entries if t > window_start]
+        entries.append(now)
+        _rate_limit_counters[user_id] = entries
+        return len(entries) > RATE_LIMIT_RPM
+
+
+# =====================================================================
+# 3. TOOL DEFINITIONS (OpenAI function schemas)
+# =====================================================================
+
+TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather_advice",
+            "description": (
+                "Fetches climate context for the user's location and returns "
+                "skincare-relevant environmental data including UV index, humidity, "
+                "temperature, and weather conditions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {
+                        "type": "number",
+                        "description": "Latitude of the user's location",
+                    },
+                    "longitude": {
+                        "type": "number",
+                        "description": "Longitude of the user's location",
+                    },
+                },
+                "required": ["latitude", "longitude"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_vision_risk_assessment",
+            "description": (
+                "Retrieves a pre-computed risk flag from the vision model for a "
+                "previously uploaded skin image. Use this when the user has shared "
+                "an image and wants to know the risk level."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_id": {
+                        "type": "string",
+                        "description": "Unique identifier for the uploaded image",
+                    },
+                },
+                "required": ["image_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_skincare_routine",
+            "description": (
+                "Generates a structured AM/PM/Weekly skincare routine as a JSON "
+                "payload. Only call this after gathering the user's skin type, "
+                "age range, primary goals, budget tier, and climate information "
+                "through conversation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skin_type": {
+                        "type": "string",
+                        "description": "User's skin type (e.g., oily, dry, combination, sensitive, normal)",
+                    },
+                    "age_range": {
+                        "type": "string",
+                        "description": "User's age range (e.g., 18-25, 26-35, 36-45, 46-55, 55+)",
+                    },
+                    "primary_goals": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "User's skincare goals (e.g., anti-aging, acne control, hydration, brightening)",
+                    },
+                    "budget_tier": {
+                        "type": "string",
+                        "enum": ["budget", "mid", "premium"],
+                        "description": "User's budget preference",
+                    },
+                    "climate": {
+                        "type": "string",
+                        "description": "User's climate/environment (e.g., tropical, arid, temperate, cold)",
+                    },
+                },
+                "required": [
+                    "skin_type",
+                    "age_range",
+                    "primary_goals",
+                    "budget_tier",
+                    "climate",
+                ],
+            },
+        },
+    },
+]
+
+
+# =====================================================================
+# 4. TOOL DISPATCHER
+# =====================================================================
+
+
+async def _execute_get_weather_advice(
+    latitude: float, longitude: float
+) -> str:
+    """Execute the weather advice tool and return a formatted string."""
+    ctx: WeatherContext = await get_weather_context(latitude, longitude)
+
+    uv_label = "low"
+    if ctx.uv_index >= 3:
+        uv_label = "moderate"
+    if ctx.uv_index >= 6:
+        uv_label = "high"
+    if ctx.uv_index >= 8:
+        uv_label = "very high"
+    if ctx.uv_index >= 11:
+        uv_label = "extreme"
+
+    climate_type = "temperate"
+    if ctx.temperature_c >= 30 and ctx.is_humid:
+        climate_type = "tropical/humid"
+    elif ctx.temperature_c >= 30:
+        climate_type = "hot/arid"
+    elif ctx.temperature_c <= 5:
+        climate_type = "cold"
+    elif ctx.is_humid:
+        climate_type = "humid"
+
+    return (
+        f"UV index is {ctx.uv_index} ({uv_label}), "
+        f"humidity is {ctx.humidity_pct}%, "
+        f"temperature is {ctx.temperature_c}°C — "
+        f"{climate_type} conditions. "
+        f"Weather: {ctx.condition}."
+    )
+
+
+async def _execute_get_vision_risk_assessment(image_id: str) -> str:
+    """Execute the vision risk assessment tool and return a formatted string."""
+    risk: RiskLevel = await get_vision_risk_flag(image_id)
+
+    messages = {
+        RiskLevel.LOW: (
+            f"The vision model has assessed image '{image_id}' as LOW risk. "
+            "No immediate concerns detected, but routine monitoring is recommended."
+        ),
+        RiskLevel.MEDIUM: (
+            f"The vision model has assessed image '{image_id}' as MEDIUM risk. "
+            "Some features warrant attention. A follow-up with a dermatologist "
+            "is recommended for a definitive evaluation."
+        ),
+        RiskLevel.HIGH: (
+            f"The vision model has assessed image '{image_id}' as HIGH risk. "
+            "MANDATORY_DISCLAIMER: This lesion has been flagged as high-risk by our vision model."
+        ),
     }
+    return messages[risk]
+
+
+async def _execute_generate_skincare_routine(
+    skin_type: str,
+    age_range: str,
+    primary_goals: list[str],
+    budget_tier: str,
+    climate: str,
+) -> str:
+    """
+    Generate a structured skincare routine via a secondary LLM call.
+    Returns JSON string that the frontend can parse into a RoutineCard.
+    """
+    routine_prompt = f"""Generate a detailed, personalized skincare routine as JSON.
+
+Patient profile:
+- Skin type: {skin_type}
+- Age range: {age_range}
+- Primary goals: {', '.join(primary_goals)}
+- Budget tier: {budget_tier}
+- Climate: {climate}
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "am_routine": [
+    {{"step": 1, "action": "...", "ingredient_target": "...", "notes": "..."}},
+    ...
+  ],
+  "pm_routine": [
+    {{"step": 1, "action": "...", "ingredient_target": "...", "notes": "..."}},
+    ...
+  ],
+  "weekly_treatments": [
+    {{"step": 1, "action": "...", "ingredient_target": "...", "notes": "..."}},
+    ...
+  ]
+}}
+
+Guidelines:
+- AM routine: 4-6 steps (cleanser, toner/essence, serum, moisturizer, sunscreen, etc.)
+- PM routine: 4-6 steps (double cleanse, treatment, serum, moisturizer, etc.)
+- Weekly treatments: 2-3 steps (exfoliation, masks, special treatments)
+- For "ingredient_target", name specific active ingredients (e.g., "Niacinamide 5%", "Hyaluronic Acid", "Salicylic Acid 2%")
+- Use "I'd recommend looking for products containing..." phrasing in notes instead of specific brand names
+- Tailor to the budget tier (budget = drugstore-accessible actives, premium = clinical-grade concentrations)
+- Adapt to climate conditions (more hydration for arid, lighter formulas for humid)
+"""
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=GPT_MINI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a skincare formulation expert. Return ONLY valid JSON, no markdown.",
+                },
+                {"role": "user", "content": routine_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.7,
+            max_tokens=2000,
+        )
+
+        raw_content = resp.choices[0].message.content or "{}"
+        # Validate the structure with Pydantic v2 model_validate_json
+        from pydantic import ValidationError as PydanticValidationError
+        try:
+            validated = SkincareRoutineOutput.model_validate_json(raw_content)
+            return validated.model_dump_json()
+        except PydanticValidationError as ve:
+            logger.error(f"Routine validation failed: {ve}")
+            raise ToolExecutionError(
+                "The generated routine had an unexpected format. "
+                "Please try again — I'll create a fresh routine for you."
+            )
+    except Exception as e:
+        logger.error(f"Routine generation failed: {e}")
+        # Return a minimal valid routine on failure
+        fallback = {
+            "am_routine": [
+                {
+                    "step": 1,
+                    "action": "Gentle Cleanser",
+                    "ingredient_target": "Ceramides, Glycerin",
+                    "notes": "Use lukewarm water, massage gently for 60 seconds",
+                },
+                {
+                    "step": 2,
+                    "action": "Moisturizer",
+                    "ingredient_target": "Hyaluronic Acid, Niacinamide",
+                    "notes": "Apply on damp skin for better absorption",
+                },
+                {
+                    "step": 3,
+                    "action": "Sunscreen SPF 30+",
+                    "ingredient_target": "Zinc Oxide or Chemical SPF filters",
+                    "notes": "Reapply every 2 hours when outdoors — non-negotiable",
+                },
+            ],
+            "pm_routine": [
+                {
+                    "step": 1,
+                    "action": "Gentle Cleanser",
+                    "ingredient_target": "Micellar water or cream cleanser",
+                    "notes": "Double cleanse if wearing sunscreen or makeup",
+                },
+                {
+                    "step": 2,
+                    "action": "Treatment Serum",
+                    "ingredient_target": "Retinol 0.3% or Niacinamide 10%",
+                    "notes": "Start low and slow with retinol, 2-3 times per week",
+                },
+                {
+                    "step": 3,
+                    "action": "Night Moisturizer",
+                    "ingredient_target": "Ceramides, Peptides, Squalane",
+                    "notes": "Can use a slightly richer formula than AM",
+                },
+            ],
+            "weekly_treatments": [
+                {
+                    "step": 1,
+                    "action": "Chemical Exfoliant",
+                    "ingredient_target": "AHA (Glycolic/Lactic Acid) or BHA (Salicylic Acid)",
+                    "notes": "1-2 times per week, skip retinol on exfoliation nights",
+                },
+            ],
+        }
+        return json.dumps(fallback)
+
+
+async def dispatch_tool_call(
+    tool_name: str, arguments: dict[str, Any]
+) -> str:
+    """
+    Route a tool call to the correct implementation.
+    Returns the tool result as a string.
+    """
+    if tool_name == "get_weather_advice":
+        return await _execute_get_weather_advice(
+            latitude=arguments["latitude"],
+            longitude=arguments["longitude"],
+        )
+    elif tool_name == "get_vision_risk_assessment":
+        return await _execute_get_vision_risk_assessment(
+            image_id=arguments["image_id"],
+        )
+    elif tool_name == "generate_skincare_routine":
+        return await _execute_generate_skincare_routine(
+            skin_type=arguments["skin_type"],
+            age_range=arguments["age_range"],
+            primary_goals=arguments["primary_goals"],
+            budget_tier=arguments["budget_tier"],
+            climate=arguments["climate"],
+        )
+    else:
+        return f"Unknown tool: {tool_name}"
+
+
+# =====================================================================
+# 5. LLM ORCHESTRATOR
+# =====================================================================
+
+SYSTEM_PROMPT = """\
+You are **Derm**, a board-certified dermatologist and empathetic skincare coach \
+inside the DermAI platform. Your communication style is warm, professional, and \
+conversational — like a trusted doctor who genuinely cares about each patient.
+
+─── CORE BEHAVIOR ───
+
+1. **Clarification first.** Never give one-size-fits-all responses. Before advising, \
+ensure you understand the user's skin type, age, climate, lifestyle, and goals. Ask \
+targeted follow-up questions when any of these are unknown.
+
+2. **Diagnostic quiz.** If a user asks for a skincare routine and their skin profile \
+is unknown from conversation history, initiate a brief 5-question diagnostic quiz. \
+Ask ONE question at a time, naturally woven into conversation:
+   Q1: "What's your skin type? (oily, dry, combination, sensitive, normal)"
+   Q2: "What age range are you in? (18-25, 26-35, 36-45, 46-55, 55+)"
+   Q3: "What's your primary skincare concern or goal?"
+   Q4: "What's your budget preference — drugstore/budget, mid-range, or premium?"
+   Q5: "What kind of climate do you live in? (humid/tropical, dry/arid, temperate, cold)"
+   After collecting all answers, call the `generate_skincare_routine` tool.
+
+3. **Product recommendations.** ALWAYS qualify recommendations with phrasing like \
+"I'd recommend looking for products containing…" — NEVER cite specific brand names \
+you cannot verify.
+
+─── SAFETY CONSTRAINTS (NON-NEGOTIABLE) ───
+
+• NEVER diagnose malignancy or cancer. If signs are concerning, say: \
+"Based on what you've described, this warrants an in-person evaluation by a \
+dermatologist. I can help you understand what to ask your doctor."
+
+• NEVER prescribe or recommend prescription-only medications (tretinoin, \
+isotretinoin, antibiotics, oral steroids, biologics). Instead, suggest the user \
+discuss these options with their healthcare provider.
+
+• NEVER make confident diagnostic claims about serious conditions. Use hedging \
+language: "This could potentially be…", "This is consistent with…"
+
+─── TOOL USAGE ───
+
+• If the user shares their location or you know their coordinates, call \
+`get_weather_advice` to factor environmental conditions into your advice.
+
+• If the user references an uploaded image or image analysis, call \
+`get_vision_risk_assessment` with the image ID.
+
+• After completing the 5-question diagnostic quiz, call \
+`generate_skincare_routine` with the gathered profile data.
+
+─── TONE GUIDELINES ───
+
+• Empathetic, never alarmist. Reassure where appropriate.
+• Use plain language. Avoid over-medicalization unless context demands it.
+• Use markdown formatting for readability: bold for key terms, bullet points \
+for lists, numbered lists for routines.
+• Keep responses focused and concise — avoid walls of text.
+• End responses with a natural follow-up question or next step when appropriate.
+
+─── DISCLAIMER ───
+
+You are an AI assistant, not a substitute for professional medical care. \
+When in doubt, always recommend consulting a board-certified dermatologist.\
+"""
+
+
+async def build_messages(
+    user_id: str,
+    session_id: str,
+    user_message: str,
+    location: Optional[LocationPayload],
+    image_id: Optional[str],
+) -> list[dict[str, Any]]:
+    """
+    Load history, inject system prompt if needed, append new user message.
+    Also injects context hints for location / image_id so the model knows
+    these attachments are available for tool calls.
+    """
+    history = await load_history(user_id, session_id)
+
+    # Ensure system prompt is always first
+    if not history or history[0].get("role") != "system":
+        history.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+
+    # Build the user message with any context hints
+    content_parts: list[str] = [user_message]
+    if location:
+        content_parts.append(
+            f"\n[System context: User's location is lat={location.lat}, lon={location.lon}. "
+            f"You may call get_weather_advice to get environmental data.]"
+        )
+    if image_id:
+        content_parts.append(
+            f"\n[System context: User has attached image with id='{image_id}'. "
+            f"You may call get_vision_risk_assessment to retrieve its risk analysis.]"
+        )
+
+    history.append({"role": "user", "content": "\n".join(content_parts)})
+    return history
+
+
+async def generate_suggestion_chips(
+    last_user_msg: str, last_assistant_msg: str
+) -> list[str]:
+    """
+    Generate 3 contextually relevant suggestion chips using a lightweight
+    secondary LLM call.
+    """
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=GPT_MINI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You generate exactly 3 short follow-up question suggestions "
+                        "for a dermatology chatbot. Return ONLY a JSON array of 3 strings. "
+                        "Each suggestion should be 4-10 words, naturally conversational, "
+                        "and contextually relevant to the last exchange. "
+                        "Example: [\"How about sunscreen tips?\", \"What causes my acne?\", \"Tell me about retinol\"]"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"User said: {last_user_msg}\nAssistant replied: {last_assistant_msg[:300]}",
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.8,
+            max_tokens=150,
+        )
+        content = resp.choices[0].message.content or "[]"
+        parsed = json.loads(content)
+        # Handle both {"suggestions": [...]} and [...] formats
+        if isinstance(parsed, list):
+            chips = parsed[:3]
+        elif isinstance(parsed, dict):
+            chips = list(parsed.values())[0] if parsed else []
+            if isinstance(chips, list):
+                chips = chips[:3]
+            else:
+                chips = []
+        else:
+            chips = []
+        return [str(c) for c in chips]
+    except Exception as e:
+        logger.warning(f"Suggestion chip generation failed: {e}")
+        return [
+            "Tell me about my skin type",
+            "What skincare routine do you recommend?",
+            "How can I protect my skin from the sun?",
+        ]
+
+
+# =====================================================================
+# 6. SSE GENERATOR
+# =====================================================================
+
+
+def _sse_event(data: dict[str, Any]) -> str:
+    """Format a dict as an SSE data line."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
+async def stream_chat_response(
+    user_id: str,
+    session_id: str,
+    user_message: str,
+    location: Optional[LocationPayload],
+    image_id: Optional[str],
+) -> AsyncGenerator[str, None]:
+    """
+    Core SSE streaming generator. Handles:
+    - OpenAI streaming with tool calls
+    - Tool execution with status events
+    - Structured routine payloads
+    - Suggestion chips generation
+    - Full history persistence
+    """
+    messages = await build_messages(
+        user_id, session_id, user_message, location, image_id
+    )
+
+    full_assistant_content = ""
+    tool_calls_accumulated: dict[int, dict[str, Any]] = {}
+
+    try:
+        # --- Main streaming loop (may iterate if tool calls occur) ---
+        max_tool_rounds = 5
+        for _round in range(max_tool_rounds):
+            stream = await openai_client.chat.completions.create(
+                model=GPT_MODEL,
+                messages=messages,
+                tools=TOOL_SCHEMAS,
+                stream=True,
+                temperature=0.7,
+                max_tokens=2000,
+            )
+
+            current_content = ""
+            tool_calls_in_round: dict[int, dict[str, Any]] = {}
+            finish_reason = None
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is None:
+                    continue
+
+                # Capture finish reason
+                if chunk.choices[0].finish_reason:
+                    finish_reason = chunk.choices[0].finish_reason
+
+                # Stream text content
+                if delta.content:
+                    current_content += delta.content
+                    yield _sse_event({"type": "text_delta", "content": delta.content})
+
+                # Accumulate tool calls
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_in_round:
+                            tool_calls_in_round[idx] = {
+                                "id": tc.id or "",
+                                "name": "",
+                                "arguments": "",
+                            }
+                        if tc.id:
+                            tool_calls_in_round[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_in_round[idx]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_in_round[idx]["arguments"] += tc.function.arguments
+
+            full_assistant_content += current_content
+
+            # If no tool calls, we're done with LLM rounds
+            if finish_reason != "tool_calls" or not tool_calls_in_round:
+                break
+
+            # --- Process tool calls ---
+            # Build the assistant message with tool_calls for history
+            assistant_tool_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": current_content if current_content else None,
+                "tool_calls": [],
+            }
+            for idx in sorted(tool_calls_in_round.keys()):
+                tc_data = tool_calls_in_round[idx]
+                assistant_tool_msg["tool_calls"].append(
+                    {
+                        "id": tc_data["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc_data["name"],
+                            "arguments": tc_data["arguments"],
+                        },
+                    }
+                )
+            messages.append(assistant_tool_msg)
+
+            # Execute each tool call
+            for idx in sorted(tool_calls_in_round.keys()):
+                tc_data = tool_calls_in_round[idx]
+                tool_name = tc_data["name"]
+                tool_call_id = tc_data["id"]
+
+                # Emit running status
+                yield _sse_event(
+                    {"type": "tool_call", "tool_name": tool_name, "status": "running"}
+                )
+
+                try:
+                    args = json.loads(tc_data["arguments"])
+                    result = await dispatch_tool_call(tool_name, args)
+
+                    # Check if this is a routine — emit structured event
+                    if tool_name == "generate_skincare_routine":
+                        try:
+                            routine_json = json.loads(result)
+                            yield _sse_event(
+                                {
+                                    "type": "structured_routine",
+                                    "payload": routine_json,
+                                }
+                            )
+                        except json.JSONDecodeError:
+                            pass
+
+                    yield _sse_event(
+                        {
+                            "type": "tool_call",
+                            "tool_name": tool_name,
+                            "status": "complete",
+                        }
+                    )
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": result,
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"Tool {tool_name} failed: {e}")
+                    yield _sse_event(
+                        {
+                            "type": "tool_call",
+                            "tool_name": tool_name,
+                            "status": "failed",
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": (
+                                f"Tool '{tool_name}' encountered an error. "
+                                "Please provide advice without this tool's data, "
+                                "noting that the information is temporarily unavailable."
+                            ),
+                        }
+                    )
+
+        # --- Append final assistant message to history ---
+        if full_assistant_content:
+            messages.append({"role": "assistant", "content": full_assistant_content})
+
+        # --- Generate suggestion chips ---
+        chips = await generate_suggestion_chips(user_message, full_assistant_content)
+        yield _sse_event({"type": "suggestion_chips", "chips": chips})
+
+        # --- Persist updated history ---
+        await save_history(user_id, session_id, messages)
+
+        # --- Done ---
+        yield _sse_event({"type": "done"})
+
+    except Exception as e:
+        logger.error(f"Chat stream error: {e}", exc_info=True)
+        yield _sse_event(
+            {
+                "type": "error",
+                "message": "Our AI assistant is temporarily unavailable. Please try again shortly.",
+            }
+        )
+
+
+# =====================================================================
+# 7. FASTAPI ROUTER
+# =====================================================================
+
+router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+@router.post("/message")
+async def chat_message(
+    body: ChatMessageRequest,
+    payload: dict = Depends(verify_token),
+) -> StreamingResponse:
+    """
+    Main chat endpoint — streams SSE events for a conversation turn.
+
+    Requires JWT auth. Rate-limited to 30 requests/minute per user.
+    """
+    user_id: str = payload["sub"]
+
+    # Rate limit check
+    if await check_rate_limit(user_id):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please wait before sending more messages.",
+            headers={"Retry-After": "60"},
+        )
+
+    return StreamingResponse(
+        stream_chat_response(
+            user_id=user_id,
+            session_id=body.session_id,
+            user_message=body.message,
+            location=body.location,
+            image_id=body.image_id,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/history/{session_id}")
+async def get_chat_history(
+    session_id: str,
+    payload: dict = Depends(verify_token),
+) -> dict[str, Any]:
+    """Returns full message history for a session."""
+    user_id: str = payload["sub"]
+    history = await load_history(user_id, session_id)
+
+    # Filter out system messages for the client
+    client_messages = [
+        msg for msg in history if msg.get("role") in ("user", "assistant")
+    ]
+    return {"session_id": session_id, "messages": client_messages}
+
+
+@router.delete("/session/{session_id}")
+async def clear_session(
+    session_id: str,
+    payload: dict = Depends(verify_token),
+) -> dict[str, str]:
+    """Clears a Redis/in-memory chat session."""
+    user_id: str = payload["sub"]
+    deleted = await delete_session(user_id, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"message": "Session cleared successfully"}
+
+
+@router.get("/sessions")
+async def get_sessions(
+    payload: dict = Depends(verify_token),
+) -> dict[str, Any]:
+    """Returns list of session IDs for the authenticated user."""
+    user_id: str = payload["sub"]
+    session_ids = await list_sessions(user_id)
+    return {"user_id": user_id, "sessions": session_ids}
