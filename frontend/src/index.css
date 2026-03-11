@@ -509,6 +509,23 @@ body {
   color: var(--accent-rose);
 }
 
+/* ── Chat Error Message ───────────────────────────── */
+.chat-error-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  margin: 0 0 12px 0;
+  background: rgba(244, 63, 94, 0.1);
+  border: 1px solid rgba(244, 63, 94, 0.2);
+  color: var(--accent-rose);
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  animation: fadeInUp 0.3s ease;
+}
+
 /* ── Chat Messages ────────────────────────────────── */
 .chat-messages {
   flex: 1;
