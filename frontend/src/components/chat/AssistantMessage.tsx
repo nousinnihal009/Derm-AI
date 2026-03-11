@@ -162,6 +162,7 @@ const RoutineCard: React.FC<{
             aria-selected={activeTab === tab.id}
             className={`routine-card__tab ${activeTab === tab.id ? 'routine-card__tab--active' : ''}`}
             onClick={() => setActiveTab(tab.id)}
+            aria-label={`${tab.id === 'am' ? 'AM' : tab.id === 'pm' ? 'PM' : 'Weekly'} routine`}
           >
             {tab.label}
           </button>
