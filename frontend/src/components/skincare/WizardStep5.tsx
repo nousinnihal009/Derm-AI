@@ -140,6 +140,7 @@ const WizardStep5: React.FC = () => {
           onClick={() => setValue('pollution_exposure', !pollutionExposure, { shouldValidate: true })}
           role="switch"
           aria-checked={pollutionExposure}
+          aria-label="High pollution urban environment toggle"
           tabIndex={0}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
