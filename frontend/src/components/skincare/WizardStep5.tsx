@@ -54,6 +54,9 @@ const WizardStep5: React.FC = () => {
                   <button
                     key={option.value}
                     type="button"
+                    role="radio"
+                    aria-checked={isSelected}
+                    aria-label={`Select ${option.label} as your skin condition`}
                     onClick={() => field.onChange(option.value)}
                     className={`
                       relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200
