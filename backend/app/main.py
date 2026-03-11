@@ -42,8 +42,30 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] Model loading failed: {e}")
         print("   Backend will start but /api/analyze will not work until model is available.")
+
+    # Start RoutineCache background purge task
+    try:
+        from app.routes.recommendations import _routine_cache
+        import logging
+        import asyncio
+        logger = logging.getLogger("dermai")
+
+        async def _purge_loop():
+            while True:
+                await asyncio.sleep(600)  # every 10 minutes
+                removed = await _routine_cache.purge_expired()
+                if removed:
+                    logger.info(f"RoutineCache: purged {removed} expired entries")
+
+        purge_task = asyncio.create_task(_purge_loop())
+    except Exception as ex:
+        print(f"Failed to start purge task: {ex}")
+        purge_task = None
+
     yield
     # Shutdown
+    if purge_task:
+        purge_task.cancel()
     print("[*] Shutting down SkinCare AI Backend...")
 
 
