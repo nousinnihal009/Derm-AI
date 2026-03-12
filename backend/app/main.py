@@ -28,6 +28,7 @@ from app.routes.report import router as report_router
 from app.routes.skin_type import router as skin_type_router
 from app.routes.aging import router as aging_router
 from app.routes.auth import router as auth_router
+from app.routes.medical_conditions import router as medical_conditions_router
 
 
 @asynccontextmanager
@@ -43,9 +44,10 @@ async def lifespan(app: FastAPI):
         print(f"[WARN] Model loading failed: {e}")
         print("   Backend will start but /api/analyze will not work until model is available.")
 
-    # Start RoutineCache background purge task
+    # Start RoutineCache + ProtocolCache background purge tasks
     try:
         from app.routes.recommendations import _routine_cache
+        from app.services.condition_advisor import _protocol_cache
         import logging
         import asyncio
         logger = logging.getLogger("dermai")
@@ -56,6 +58,9 @@ async def lifespan(app: FastAPI):
                 removed = await _routine_cache.purge_expired()
                 if removed:
                     logger.info(f"RoutineCache: purged {removed} expired entries")
+                removed_p = await _protocol_cache.purge_expired()
+                if removed_p:
+                    logger.info(f"ProtocolCache: purged {removed_p} expired entries")
 
         purge_task = asyncio.create_task(_purge_loop())
     except Exception as ex:
@@ -96,6 +101,7 @@ app.include_router(report_router)
 app.include_router(skin_type_router)
 app.include_router(aging_router)
 app.include_router(auth_router)
+app.include_router(medical_conditions_router)
 
 
 @app.get("/")
@@ -120,5 +126,8 @@ def root():
             "auth_register": "POST /api/auth/register",
             "auth_login": "POST /api/auth/login",
             "auth_profile": "GET /api/auth/profile",
+            "medical_protocol": "POST /api/medical/protocol",
+            "medical_conditions": "GET /api/medical/conditions",
+            "medical_condition_preview": "GET /api/medical/conditions/{key}",
         }
     }
