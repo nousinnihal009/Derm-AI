@@ -75,7 +75,10 @@ export function EducationCard({ education, referral_recommended }: EducationCard
       </div>
 
       {education.contagion_guidance && (
-        <div style={{
+        <div 
+          role="alert" 
+          aria-live="polite"
+          style={{
           background: 'rgba(245,158,11,0.1)', borderRadius: '8px', padding: '0.75rem',
           border: '1px solid rgba(245,158,11,0.2)',
         }}>

@@ -8,6 +8,8 @@
  * Step 4: Age Group + Location Consent → Submit (IntakeStep4)
  */
 
+import { useMutation } from '@tanstack/react-query'
+import axiosInstance from '../../lib/axios'
 import { useMedicalStore } from '../../store/medicalStore'
 import { IntakeStep1 } from './intake/IntakeStep1'
 import { IntakeStep2 } from './intake/IntakeStep2'
@@ -17,26 +19,76 @@ import {
   CONDITION_ICONS,
   CONDITION_DESCRIPTORS,
 } from '../../constants/conditionMeta'
-import type { ConditionKey } from '../../types/conditions'
+import type { ConditionKey, ConditionRequest, ConditionResponse } from '../../types/conditions'
 
-export function ConditionIntakeWizard() {
+interface ConditionIntakeWizardProps {
+  condition: ConditionKey
+  onProtocolGenerated: () => void
+  onBack: () => void
+}
+
+export function ConditionIntakeWizard({ condition, onProtocolGenerated, onBack }: ConditionIntakeWizardProps) {
   const wizardStep = useMedicalStore((s) => s.wizardStep)
   const setWizardStep = useMedicalStore((s) => s.setWizardStep)
-  const selectedCondition = useMedicalStore((s) => s.selectedCondition)
   const clearSelection = useMedicalStore((s) => s.clearSelection)
+  const setLastProtocol = useMedicalStore((s) => s.setLastProtocol)
 
-  // Only what the orchestrator needs for validation gates
+  // Only what the orchestrator needs for validation gates & request payload
+  const severity = useMedicalStore((s) => s.severity)
+  const skinType = useMedicalStore((s) => s.skinType)
+  const ageGroup = useMedicalStore((s) => s.ageGroup)
   const affectedAreas = useMedicalStore((s) => s.affectedAreas)
+  const symptomDuration = useMedicalStore((s) => s.symptomDuration)
+  const knownTriggers = useMedicalStore((s) => s.knownTriggers)
   const currentTreatments = useMedicalStore((s) => s.currentTreatments)
-  const protocolLoading = useMedicalStore((s) => s.protocolLoading)
-  const protocolError = useMedicalStore((s) => s.protocolError)
-  const generateProtocol = useMedicalStore((s) => s.generateProtocol)
-
-  if (!selectedCondition) return null
-  const key = selectedCondition as ConditionKey
+  const locationConsent = useMedicalStore((s) => s.locationConsent)
 
   const canProceedStep2 = affectedAreas.length > 0
-  const canProceedStep3 = currentTreatments.length > 0
+  const canProceedStep3 = currentTreatments.length >= 0 // currentTreatments can be 0 (none)
+
+  const mutation = useMutation({
+    mutationFn: async (payload: ConditionRequest) =>
+      axiosInstance.post<ConditionResponse>('/api/medical/protocol', payload).then(r => r.data),
+    onSuccess: (data) => {
+      setLastProtocol(data)
+      onProtocolGenerated()
+    },
+    onError: () => {}
+  })
+
+  // Re-creating the internal generate function to gather payload
+  const handleGenerate = async () => {
+    let location: { lat: number; lon: number } | null = null
+    if (locationConsent) {
+      try {
+        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 3000 })
+        )
+        location = { lat: pos.coords.latitude, lon: pos.coords.longitude }
+      } catch {
+        // Proceed without location
+      }
+    }
+
+    const payload: ConditionRequest = {
+      condition,
+      severity,
+      skin_type: skinType,
+      age_group: ageGroup,
+      affected_areas: affectedAreas,
+      symptom_duration: symptomDuration,
+      known_triggers: knownTriggers,
+      current_treatments: currentTreatments,
+      ...(location ? { location } : {}),
+    }
+
+    mutation.mutate(payload)
+  }
+
+  const handleCancel = () => {
+    clearSelection()
+    onBack()
+  }
 
   const STEP_LABELS: Record<number, string> = {
     1: 'Basic Info',
@@ -72,10 +124,10 @@ export function ConditionIntakeWizard() {
         justifyContent: 'space-between',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <span style={{ fontSize: '1.75rem' }}>{CONDITION_ICONS[key]}</span>
+          <span style={{ fontSize: '1.75rem' }}>{CONDITION_ICONS[condition]}</span>
           <div>
             <h2 style={{ color: '#fff', margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>
-              {CONDITION_DESCRIPTORS[key] ? key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : key}
+              {CONDITION_DESCRIPTORS[condition] ? condition.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : condition}
             </h2>
             <p style={{ color: 'rgba(255,255,255,0.4)', margin: 0, fontSize: '0.78rem' }}>
               Step {wizardStep} of 4 — {STEP_LABELS[wizardStep as number] || ''}
@@ -83,7 +135,7 @@ export function ConditionIntakeWizard() {
           </div>
         </div>
         <button
-          onClick={clearSelection}
+          onClick={handleCancel}
           aria-label="Change selected condition"
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
@@ -131,21 +183,21 @@ export function ConditionIntakeWizard() {
         <div>
           <IntakeStep4 />
 
-          {protocolError && (
+          {mutation.isError && (
             <div style={{
               background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
               borderRadius: '10px', padding: '0.75rem 1rem', marginBottom: '1rem',
               color: '#ef4444', fontSize: '0.85rem',
             }}>
-              ⚠️ {protocolError}
+              ⚠️ {mutation.error instanceof Error ? mutation.error.message : 'Error generating protocol'}
             </div>
           )}
 
           <NavButtons
             onBack={() => setWizardStep(3)}
-            submitLabel={protocolLoading ? 'Generating Protocol…' : 'Generate My Protocol'}
-            onSubmit={generateProtocol}
-            submitDisabled={protocolLoading}
+            submitLabel={mutation.isPending ? 'Generating Protocol…' : 'Generate My Protocol'}
+            onSubmit={handleGenerate}
+            submitDisabled={mutation.isPending}
           />
         </div>
       )}

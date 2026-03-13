@@ -1,10 +1,24 @@
 // REMEDIATION: Fix 2 applied
 /**
- * IntakeStep2.tsx — Affected areas + symptom duration + known triggers
+ * IntakeStep2.tsx — Severity, Symptom duration, and Affected areas
  */
 
 import { useMedicalStore } from '../../../store/medicalStore'
-import type { AffectedArea, SymptomDuration, KnownTrigger } from '../../../types/conditions'
+import type { Severity, SymptomDuration, AffectedArea } from '../../../types/conditions'
+
+const SEVERITY_OPTIONS: { value: Severity; label: string; color: string; desc: string }[] = [
+  { value: 'mild', label: 'Mild', color: '#34d399', desc: 'Occasional, minor symptoms' },
+  { value: 'moderate', label: 'Moderate', color: '#f59e0b', desc: 'Noticeable, regular symptoms' },
+  { value: 'severe', label: 'Severe', color: '#ef4444', desc: 'Significant daily impact' },
+]
+
+const DURATIONS: { value: SymptomDuration; label: string }[] = [
+  { value: 'less_than_1_week', label: '< 1 week' },
+  { value: '1_to_4_weeks', label: '1–4 weeks' },
+  { value: '1_to_6_months', label: '1–6 months' },
+  { value: 'more_than_6_months', label: '6+ months' },
+  { value: 'chronic_recurring', label: 'Chronic / recurring' },
+]
 
 const AREAS: { value: AffectedArea; label: string }[] = [
   { value: 'face', label: '😊 Face' },
@@ -19,34 +33,13 @@ const AREAS: { value: AffectedArea; label: string }[] = [
   { value: 'widespread', label: '🔄 Widespread' },
 ]
 
-const DURATIONS: { value: SymptomDuration; label: string }[] = [
-  { value: 'less_than_1_week', label: '< 1 week' },
-  { value: '1_to_4_weeks', label: '1–4 weeks' },
-  { value: '1_to_6_months', label: '1–6 months' },
-  { value: 'more_than_6_months', label: '6+ months' },
-  { value: 'chronic_recurring', label: 'Chronic / recurring' },
-]
-
-const TRIGGERS: { value: KnownTrigger; label: string }[] = [
-  { value: 'stress', label: '😰 Stress' },
-  { value: 'diet', label: '🍕 Diet' },
-  { value: 'heat', label: '🔥 Heat' },
-  { value: 'cold', label: '❄️ Cold' },
-  { value: 'sun_exposure', label: '☀️ Sun' },
-  { value: 'sweat', label: '💦 Sweat' },
-  { value: 'specific_products', label: '🧴 Products' },
-  { value: 'hormonal', label: '🔄 Hormonal' },
-  { value: 'unknown', label: '❓ Unknown' },
-  { value: 'none', label: '✅ None' },
-]
-
 export function IntakeStep2() {
-  const affectedAreas = useMedicalStore((s) => s.affectedAreas)
-  const setAffectedAreas = useMedicalStore((s) => s.setAffectedAreas)
+  const severity = useMedicalStore((s) => s.severity)
+  const setSeverity = useMedicalStore((s) => s.setSeverity)
   const symptomDuration = useMedicalStore((s) => s.symptomDuration)
   const setSymptomDuration = useMedicalStore((s) => s.setSymptomDuration)
-  const knownTriggers = useMedicalStore((s) => s.knownTriggers)
-  const setKnownTriggers = useMedicalStore((s) => s.setKnownTriggers)
+  const affectedAreas = useMedicalStore((s) => s.affectedAreas)
+  const setAffectedAreas = useMedicalStore((s) => s.setAffectedAreas)
 
   const toggleArray = <T extends string>(arr: T[], val: T, setter: (v: T[]) => void) => {
     setter(arr.includes(val) ? arr.filter((v) => v !== val) : [...arr, val])
@@ -54,16 +47,38 @@ export function IntakeStep2() {
 
   return (
     <div>
-      <Section title="Affected areas (select all that apply)">
-        <MultiChipGroup options={AREAS} selected={affectedAreas} onToggle={(v) => toggleArray(affectedAreas, v as AffectedArea, setAffectedAreas)} />
+      <Section title="How severe are your symptoms?">
+        <div role="radiogroup" aria-label="Select symptom severity" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {SEVERITY_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              role="radio"
+              aria-checked={severity === opt.value}
+              onClick={() => setSeverity(opt.value)}
+              style={{
+                flex: '1 1 140px',
+                background: severity === opt.value ? `${opt.color}18` : 'rgba(255,255,255,0.04)',
+                border: `2px solid ${severity === opt.value ? opt.color : 'rgba(255,255,255,0.1)'}`,
+                borderRadius: '12px',
+                padding: '1rem',
+                cursor: 'pointer',
+                textAlign: 'center',
+                transition: 'all 0.2s',
+              }}
+            >
+              <div style={{ color: opt.color, fontWeight: 600, fontSize: '0.95rem' }}>{opt.label}</div>
+              <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: '0.72rem', marginTop: '0.25rem' }}>{opt.desc}</div>
+            </button>
+          ))}
+        </div>
       </Section>
 
       <Section title="How long have you had symptoms?">
         <ChipGroup options={DURATIONS} selected={symptomDuration} onSelect={(v) => setSymptomDuration(v as SymptomDuration)} />
       </Section>
 
-      <Section title="Known triggers (select all that apply)">
-        <MultiChipGroup options={TRIGGERS} selected={knownTriggers} onToggle={(v) => toggleArray(knownTriggers, v as KnownTrigger, setKnownTriggers)} />
+      <Section title="Affected areas (select all that apply)">
+        <MultiChipGroup options={AREAS} selected={affectedAreas} onToggle={(v) => toggleArray(affectedAreas, v as AffectedArea, setAffectedAreas)} />
       </Section>
     </div>
   )
@@ -124,6 +139,9 @@ function MultiChipGroup({ options, selected, onToggle }: {
         return (
           <button
             key={opt.value}
+            role="checkbox"
+            aria-checked={isActive}
+            aria-label={`Affected area: ${opt.label}`}
             onClick={() => onToggle(opt.value)}
             style={{
               background: isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)',

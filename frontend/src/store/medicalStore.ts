@@ -63,7 +63,8 @@ interface MedicalStore {
   setLocationConsent: (v: boolean) => void
 
   // ── Protocol Result ──
-  protocol: ConditionResponse | null
+  lastProtocol: ConditionResponse | null
+  setLastProtocol: (p: ConditionResponse | null) => void
   protocolLoading: boolean
   protocolError: string | null
   generateProtocol: () => Promise<void>
@@ -137,7 +138,8 @@ export const useMedicalStore = create<MedicalStore>()((set, get) => ({
   setLocationConsent: (v) => set({ locationConsent: v }),
 
   // Protocol
-  protocol: null,
+  lastProtocol: null,
+  setLastProtocol: (p) => set({ lastProtocol: p }),
   protocolLoading: false,
   protocolError: null,
   generateProtocol: async () => {
@@ -181,19 +183,19 @@ export const useMedicalStore = create<MedicalStore>()((set, get) => ({
         throw new Error(errData.detail || `HTTP ${res.status}`)
       }
       const data: ConditionResponse = await res.json()
-      set({ protocol: data, protocolLoading: false, wizardStep: 4 })
+      set({ lastProtocol: data, protocolLoading: false, wizardStep: 4 })
     } catch (e: any) {
       set({ protocolError: e.message, protocolLoading: false })
     }
   },
-  clearProtocol: () => set({ protocol: null, protocolError: null }),
+  clearProtocol: () => set({ lastProtocol: null, protocolError: null }),
 
   // Full reset
   resetAll: () => set({
     wizardStep: 0,
     selectedCondition: null,
     preview: null,
-    protocol: null,
+    lastProtocol: null,
     protocolLoading: false,
     protocolError: null,
     ...initialFormState,

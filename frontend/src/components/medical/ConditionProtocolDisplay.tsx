@@ -16,11 +16,11 @@ import { ClimateCard } from './display/ClimateCard'
 import type { ConditionKey } from '../../types/conditions'
 
 export function ConditionProtocolDisplay() {
-  const protocol = useMedicalStore((s) => s.protocol)
+  const lastProtocol = useMedicalStore((s) => s.lastProtocol)
   const knownTriggers = useMedicalStore((s) => s.knownTriggers)
   const resetAll = useMedicalStore((s) => s.resetAll)
 
-  if (!protocol) {
+  if (!lastProtocol) {
     return (
       <div style={{ textAlign: 'center', padding: '4rem', color: 'rgba(255,255,255,0.5)' }}>
         <p>No protocol generated yet.</p>
@@ -31,10 +31,10 @@ export function ConditionProtocolDisplay() {
   return (
     <div>
       {/* Referral Banner */}
-      {protocol.referral_recommended && (
+      {lastProtocol.referral_recommended && (
         <ReferralBanner
-          referral_urgency={protocol.referral_urgency}
-          condition={protocol.condition as ConditionKey}
+          referral_urgency={lastProtocol.referral_urgency}
+          condition={lastProtocol.condition as ConditionKey}
         />
       )}
 
@@ -45,69 +45,69 @@ export function ConditionProtocolDisplay() {
       }}>
         <div>
           <h2 style={{ color: '#fff', margin: 0, fontSize: '1.3rem', fontWeight: 700 }}>
-            {protocol.condition_display_name}
+            {lastProtocol.condition_display_name}
           </h2>
           <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-            <Badge label={`Severity: ${protocol.severity_assessed}`}
-              color={protocol.severity_assessed === 'severe' ? '#ef4444' : protocol.severity_assessed === 'moderate' ? '#f59e0b' : '#22c55e'} />
-            <Badge label={protocol.category.replace('_', ' ')} color="#6366f1" />
-            {protocol.is_contagious && <Badge label="Contagious" color="#f59e0b" />}
-            {protocol.llm_enriched && <Badge label="AI-Enhanced" color="#8b5cf6" />}
+            <Badge label={`Severity: ${lastProtocol.severity_assessed}`}
+              color={lastProtocol.severity_assessed === 'severe' ? '#ef4444' : lastProtocol.severity_assessed === 'moderate' ? '#f59e0b' : '#22c55e'} />
+            <Badge label={lastProtocol.category.replace('_', ' ')} color="#6366f1" />
+            {lastProtocol.is_contagious && <Badge label="Contagious" color="#f59e0b" />}
+            {lastProtocol.llm_enriched && <Badge label="AI-Enhanced" color="#8b5cf6" />}
           </div>
         </div>
       </div>
 
       {/* Education */}
       <EducationCard
-        education={protocol.education}
-        referral_recommended={protocol.referral_recommended}
+        education={lastProtocol.education}
+        referral_recommended={lastProtocol.referral_recommended}
       />
 
       {/* Care Plan */}
-      <CarePlanSection care_plan={protocol.care_plan} />
+      <CarePlanSection care_plan={lastProtocol.care_plan} />
 
       {/* Ingredients */}
       <IngredientGuide
-        ingredients_to_seek={protocol.ingredients_to_seek}
-        ingredients_to_avoid={protocol.ingredients_to_avoid}
+        ingredients_to_seek={lastProtocol.ingredients_to_seek}
+        ingredients_to_avoid={lastProtocol.ingredients_to_avoid}
       />
 
       {/* Triggers */}
       <TriggerPanel
-        trigger_guidance={protocol.trigger_guidance}
+        trigger_guidance={lastProtocol.trigger_guidance}
         user_triggers={knownTriggers}
       />
 
       {/* Red Flags */}
       <RedFlagsPanel
-        red_flags={protocol.red_flags}
-        when_to_see_doctor={protocol.when_to_see_doctor}
+        red_flags={lastProtocol.red_flags}
+        when_to_see_doctor={lastProtocol.when_to_see_doctor}
       />
 
       {/* Weather */}
-      {protocol.weather_context && (
+      {lastProtocol.weather_context && (
         <Card title="🌤️ Weather-Adjusted Advice">
           <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-            <WeatherStat label="Temp" value={`${protocol.weather_context.temperature_c.toFixed(1)}°C`} />
-            <WeatherStat label="Humidity" value={`${protocol.weather_context.humidity_pct.toFixed(0)}%`} />
-            <WeatherStat label="UV Index" value={protocol.weather_context.uv_index.toFixed(1)} />
+            <WeatherStat label="Temp" value={`${lastProtocol.weather_context.temperature_c.toFixed(1)}°C`} />
+            <WeatherStat label="Humidity" value={`${lastProtocol.weather_context.humidity_pct.toFixed(0)}%`} />
+            <WeatherStat label="UV Index" value={lastProtocol.weather_context.uv_index.toFixed(1)} />
           </div>
           <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.82rem', margin: 0 }}>
-            {protocol.weather_context.routine_impact}
+            {lastProtocol.weather_context.routine_impact}
           </p>
         </Card>
       )}
 
       {/* Climate Care Note */}
-      {protocol.climate_care_note && (
-        <ClimateCard climate_care_note={protocol.climate_care_note} />
+      {lastProtocol.climate_care_note && (
+        <ClimateCard climate_care_note={lastProtocol.climate_care_note} />
       )}
 
       {/* Prescription Note */}
-      {protocol.prescription_interaction_note && (
+      {lastProtocol.prescription_interaction_note && (
         <Card title="💊 Prescription Notes">
           <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.82rem', margin: 0, lineHeight: 1.6 }}>
-            {protocol.prescription_interaction_note}
+            {lastProtocol.prescription_interaction_note}
           </p>
         </Card>
       )}
@@ -129,8 +129,8 @@ export function ConditionProtocolDisplay() {
 
       {/* Disclaimer Footer — sticky */}
       <DisclaimerFooter
-        medical_disclaimer={protocol.medical_disclaimer}
-        llm_enriched={protocol.llm_enriched}
+        medical_disclaimer={lastProtocol.medical_disclaimer}
+        llm_enriched={lastProtocol.llm_enriched}
       />
     </div>
   )

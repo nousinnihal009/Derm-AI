@@ -7,7 +7,7 @@
  *   4 → ConditionProtocolDisplay (results)
  */
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useMedicalStore } from '../store/medicalStore'
 import { ConditionGrid } from './medical/ConditionGrid'
 import { ConditionIntakeWizard } from './medical/ConditionIntakeWizard'
@@ -19,13 +19,30 @@ interface MedicalPageProps {
 }
 
 export default function MedicalPage({ onNavigate }: MedicalPageProps) {
-  const wizardStep = useMedicalStore((s) => s.wizardStep)
+  const [view, setView] = useState<'browse' | 'intake' | 'result'>('browse')
+  
+  const selectedCondition = useMedicalStore((s) => s.selectedCondition)
+  const lastProtocol = useMedicalStore((s) => s.lastProtocol)
   const fetchConditions = useMedicalStore((s) => s.fetchConditions)
   const resetAll = useMedicalStore((s) => s.resetAll)
 
   useEffect(() => {
     fetchConditions()
   }, [fetchConditions])
+
+  // Sync state with selected condition (if selected from grid)
+  useEffect(() => {
+    if (selectedCondition && view === 'browse') {
+      setView('intake')
+    } else if (!selectedCondition && view !== 'browse') {
+      setView('browse')
+    }
+  }, [selectedCondition, view])
+
+  const handleStartOver = () => {
+    resetAll()
+    setView('browse')
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg-primary, #0a0a12)' }}>
@@ -56,9 +73,9 @@ export default function MedicalPage({ onNavigate }: MedicalPageProps) {
               Evidence-based skincare protocols for medical skin conditions
             </p>
           </div>
-          {wizardStep > 0 && (
+          {view !== 'browse' && (
             <button
-              onClick={resetAll}
+              onClick={handleStartOver}
               style={{
                 background: 'rgba(255,255,255,0.08)',
                 color: 'rgba(255,255,255,0.7)',
@@ -104,9 +121,22 @@ export default function MedicalPage({ onNavigate }: MedicalPageProps) {
 
       {/* Content */}
       <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '0 1.5rem 3rem' }}>
-        {wizardStep === 0 && <ConditionGrid onNavigate={onNavigate} />}
-        {(wizardStep >= 1 && wizardStep <= 3) && <ConditionIntakeWizard />}
-        {wizardStep === 4 && <ConditionProtocolDisplay />}
+        {view === 'browse' && <ConditionGrid onNavigate={onNavigate} />}
+        
+        {view === 'intake' && selectedCondition && (
+          <ConditionIntakeWizard
+            condition={selectedCondition}
+            onProtocolGenerated={() => setView('result')}
+            onBack={() => setView('browse')}
+          />
+        )}
+        
+        {view === 'result' && lastProtocol && (
+          <ConditionProtocolDisplay />
+        )}
+        {view === 'result' && !lastProtocol && (
+          <>{setView('browse')}</>
+        )}
       </div>
     </div>
   )

@@ -1,5 +1,4 @@
-// REMEDIATION: Fix 7 applied
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import LandingPage from './components/LandingPage';
 import SkinAnalysis from './components/SkinAnalysis';
 import ResultsPage from './components/ResultsPage';
@@ -63,23 +62,9 @@ const App: React.FC = () => {
     { id: 'profile', label: '👤' },
   ];
 
-  // Fix 7: NEW badge with 30-day expiry
-  const MEDICAL_LAUNCH_KEY = 'dermai_medical_launch_ts'
-  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
-  const [showMedicalBadge, setShowMedicalBadge] = useState(false)
-
-  useEffect(() => {
-    const stored = localStorage.getItem(MEDICAL_LAUNCH_KEY)
-    if (!stored) {
-      localStorage.setItem(MEDICAL_LAUNCH_KEY, Date.now().toString())
-      setShowMedicalBadge(true)
-    } else {
-      const elapsed = Date.now() - parseInt(stored, 10)
-      setShowMedicalBadge(elapsed < THIRTY_DAYS_MS)
-    }
-  }, [])
-
-  const dismissMedicalBadge = () => setShowMedicalBadge(false)
+  // Fix D Correction: NEW badge with hardcoded 30-day expiry from launch date
+  const MEDICAL_LAUNCH_TS = new Date('2025-03-13').getTime()
+  const SHOW_NEW_BADGE = Date.now() - MEDICAL_LAUNCH_TS < 30 * 24 * 60 * 60 * 1000
 
   const renderPage = () => {
     switch (currentPage) {
@@ -136,12 +121,11 @@ const App: React.FC = () => {
                 aria-label={`Navigate to ${item.label} page`}
                 onClick={() => {
                   navigate(item.id)
-                  if (item.id === 'medical') dismissMedicalBadge()
                 }}
                 style={{ position: 'relative' }}
               >
                 {item.label}
-                {item.id === 'medical' && showMedicalBadge && (
+                {item.id === 'medical' && SHOW_NEW_BADGE && (
                   <span style={{
                     position: 'absolute', top: '-4px', right: '-8px',
                     background: 'linear-gradient(135deg, #ef4444, #f97316)',

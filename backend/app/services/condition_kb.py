@@ -507,7 +507,7 @@ def _build_kb_part2(kb: dict[str, ConditionKB]) -> None:
             ("Sulfur-based treatments (if prescribed)", "Antimicrobial that helps perioral dermatitis"),
         ],
         avoid_ingredients=[
-            ("ALL topical steroids (hydrocortisone, betamethasone, etc.)", "The most common cause of perioral dermatitis — NEVER use on face for this condition"),
+            ("Topical corticosteroids (hydrocortisone, betamethasone, clobetasol, etc.)", "The most common cause of perioral dermatitis — NEVER use on face for this condition"),
             ("Heavy creams and moisturizers", "Occlusion worsens perioral dermatitis"),
             ("Occlusive moisturizers (petrolatum, lanolin near mouth)", "Trap the irritation that drives the condition"),
             ("Fluorinated toothpaste", "Fluoride can trigger and maintain perioral dermatitis"),

@@ -1,16 +1,10 @@
 // REMEDIATION: Fix 2 applied
 /**
- * IntakeStep1.tsx — Condition confirmation card + severity + skin type selector
+ * IntakeStep1.tsx — Skin type selector (Condition confirmation is in wizard header)
  */
 
 import { useMedicalStore } from '../../../store/medicalStore'
-import type { Severity, SkinType } from '../../../types/conditions'
-
-const SEVERITY_OPTIONS: { value: Severity; label: string; color: string; desc: string }[] = [
-  { value: 'mild', label: 'Mild', color: '#34d399', desc: 'Occasional, minor symptoms' },
-  { value: 'moderate', label: 'Moderate', color: '#f59e0b', desc: 'Noticeable, regular symptoms' },
-  { value: 'severe', label: 'Severe', color: '#ef4444', desc: 'Significant daily impact' },
-]
+import type { SkinType } from '../../../types/conditions'
 
 const SKIN_TYPES: { value: SkinType; label: string }[] = [
   { value: 'oily', label: '🫧 Oily' },
@@ -21,37 +15,11 @@ const SKIN_TYPES: { value: SkinType; label: string }[] = [
 ]
 
 export function IntakeStep1() {
-  const severity = useMedicalStore((s) => s.severity)
-  const setSeverity = useMedicalStore((s) => s.setSeverity)
   const skinType = useMedicalStore((s) => s.skinType)
   const setSkinType = useMedicalStore((s) => s.setSkinType)
 
   return (
     <div>
-      <Section title="How severe are your symptoms?">
-        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-          {SEVERITY_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setSeverity(opt.value)}
-              style={{
-                flex: '1 1 140px',
-                background: severity === opt.value ? `${opt.color}18` : 'rgba(255,255,255,0.04)',
-                border: `2px solid ${severity === opt.value ? opt.color : 'rgba(255,255,255,0.1)'}`,
-                borderRadius: '12px',
-                padding: '1rem',
-                cursor: 'pointer',
-                textAlign: 'center',
-                transition: 'all 0.2s',
-              }}
-            >
-              <div style={{ color: opt.color, fontWeight: 600, fontSize: '0.95rem' }}>{opt.label}</div>
-              <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: '0.72rem', marginTop: '0.25rem' }}>{opt.desc}</div>
-            </button>
-          ))}
-        </div>
-      </Section>
-
       <Section title="Your skin type">
         <ChipGroup options={SKIN_TYPES} selected={skinType} onSelect={(v) => setSkinType(v as SkinType)} />
       </Section>
