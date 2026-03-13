@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+// REMEDIATION: Fix 7 applied
+import React, { useState, useEffect } from 'react';
 import LandingPage from './components/LandingPage';
 import SkinAnalysis from './components/SkinAnalysis';
 import ResultsPage from './components/ResultsPage';
@@ -62,6 +63,24 @@ const App: React.FC = () => {
     { id: 'profile', label: '👤' },
   ];
 
+  // Fix 7: NEW badge with 30-day expiry
+  const MEDICAL_LAUNCH_KEY = 'dermai_medical_launch_ts'
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+  const [showMedicalBadge, setShowMedicalBadge] = useState(false)
+
+  useEffect(() => {
+    const stored = localStorage.getItem(MEDICAL_LAUNCH_KEY)
+    if (!stored) {
+      localStorage.setItem(MEDICAL_LAUNCH_KEY, Date.now().toString())
+      setShowMedicalBadge(true)
+    } else {
+      const elapsed = Date.now() - parseInt(stored, 10)
+      setShowMedicalBadge(elapsed < THIRTY_DAYS_MS)
+    }
+  }, [])
+
+  const dismissMedicalBadge = () => setShowMedicalBadge(false)
+
   const renderPage = () => {
     switch (currentPage) {
       case 'landing':
@@ -89,7 +108,7 @@ const App: React.FC = () => {
       case 'profile':
         return <AuthProfile />;
       case 'medical':
-        return <MedicalPage />;
+        return <MedicalPage onNavigate={navigate} />;
       default:
         return <LandingPage onNavigate={navigate} />;
     }
@@ -114,9 +133,25 @@ const App: React.FC = () => {
               <button
                 key={item.id}
                 className={`nav-link ${currentPage === item.id ? 'active' : ''}`}
-                onClick={() => navigate(item.id)}
+                onClick={() => {
+                  navigate(item.id)
+                  if (item.id === 'medical') dismissMedicalBadge()
+                }}
+                style={{ position: 'relative' }}
               >
                 {item.label}
+                {item.id === 'medical' && showMedicalBadge && (
+                  <span style={{
+                    position: 'absolute', top: '-4px', right: '-8px',
+                    background: 'linear-gradient(135deg, #ef4444, #f97316)',
+                    color: '#fff', fontSize: '0.55rem', fontWeight: 700,
+                    padding: '1px 5px', borderRadius: '6px',
+                    lineHeight: '1.3', letterSpacing: '0.04em',
+                    animation: 'pulse-badge 2s infinite',
+                  }}>
+                    NEW
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -140,3 +175,8 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+// Fix 7 keyframes — injected globally
+const styleEl = document.createElement('style')
+styleEl.textContent = `@keyframes pulse-badge { 0%,100%{transform:scale(1)} 50%{transform:scale(1.15)} }`
+document.head.appendChild(styleEl)
