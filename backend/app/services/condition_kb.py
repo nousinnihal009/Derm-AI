@@ -540,7 +540,7 @@ def _build_kb_part2(kb: dict[str, ConditionKB]) -> None:
         category="infectious",
         is_contagious=False,
         is_curable=True,
-        contagion_guidance=None,
+        contagion_guidance="Not contagious. Fungal acne is an overgrowth of Malassezia yeast, which naturally lives on everyone's skin. You cannot catch it from or pass it to someone else.",
         what_it_is="Fungal acne is not actually acne — it is a yeast infection of the hair follicles caused by Malassezia yeast overgrowth. It presents as uniform, itchy bumps usually on the chest, back, and forehead.",
         what_causes_it="Caused by overgrowth of Malassezia yeast in hair follicles, triggered by excess sweat, humidity, occlusive products, and use of products containing ingredients that feed the yeast.",
         typical_duration="Responds to antifungal treatment within 2–4 weeks. Can recur if triggers are not managed.",
