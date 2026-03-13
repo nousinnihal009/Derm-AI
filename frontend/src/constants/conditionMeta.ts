@@ -4,26 +4,27 @@
 
 import type { ConditionKey, ConditionCategory } from '../types/conditions'
 
+// REMEDIATION: Fix 6 applied
 /** One-line descriptors shown on condition cards in the ConditionGrid. */
 export const CONDITION_DESCRIPTORS: Record<ConditionKey, string> = {
-  atopic_dermatitis: 'Chronic dry, itchy patches with flare cycles',
-  contact_dermatitis: 'Rash from skin contact with an irritant or allergen',
-  rosacea: 'Facial redness, flushing, and visible blood vessels',
-  seborrheic_dermatitis: 'Flaky, greasy scales on the scalp and face',
-  psoriasis: 'Thick, scaly plaques with silvery-white buildup',
-  lichen_planus: 'Purple, flat-topped bumps with a lacy pattern',
-  perioral_dermatitis: 'Red, bumpy rash around the mouth and chin',
-  fungal_acne: 'Uniform itchy bumps caused by yeast overgrowth',
-  ringworm: 'Circular, red, scaly patches that expand outward',
-  warts: 'Rough, raised bumps caused by HPV on skin surfaces',
-  molluscum_contagiosum: 'Small, firm, dome-shaped bumps with a dimple',
-  impetigo: 'Honey-colored crusted sores, highly contagious',
-  cold_sores: 'Painful fluid-filled blisters on or near the lips',
-  vitiligo: 'Loss of skin pigment creating white patches',
-  melasma: 'Dark, symmetrical patches on sun-exposed areas',
-  post_inflammatory_hyperpigmentation: 'Dark marks left behind after skin inflammation',
-  actinic_keratosis: 'Rough, scaly patches from sun damage — pre-cancerous',
-  melanoma_risk: 'Atypical moles or elevated risk of skin cancer',
+  atopic_dermatitis:                    'Chronic dry, itchy patches with recurring flare cycles',
+  contact_dermatitis:                   'Rash triggered by skin contact with an irritant or allergen',
+  rosacea:                              'Persistent facial redness, flushing, and visible blood vessels',
+  seborrheic_dermatitis:                'Flaky, oily patches on the scalp, face, or chest',
+  psoriasis:                            'Thick, scaly plaques from rapid skin cell turnover',
+  lichen_planus:                        'Purple, flat-topped itchy bumps or patches on skin or mouth',
+  perioral_dermatitis:                  'Small red bumps and rash around the mouth and nose',
+  fungal_acne:                          'Itchy, uniform bumps caused by Malassezia yeast — not bacteria',
+  ringworm:                             'Circular, scaly ring-shaped rash caused by a fungal infection',
+  warts:                                'Rough, raised skin growths caused by the HPV virus',
+  molluscum_contagiosum:                'Small, dome-shaped pearly bumps caused by a poxvirus',
+  impetigo:                             'Contagious bacterial infection causing honey-colored crusted sores',
+  cold_sores:                           'Fluid-filled blisters around the lips caused by HSV-1',
+  vitiligo:                             'Loss of skin pigmentation causing white patches on the skin',
+  melasma:                              'Brown or gray-brown patches from sun exposure and hormonal triggers',
+  post_inflammatory_hyperpigmentation:  'Dark spots left behind after acne, injury, or inflammation heals',
+  actinic_keratosis:                    'Rough, scaly patch from UV damage — requires medical evaluation',
+  melanoma_risk:                        'Elevated risk of melanoma — requires dermatologist surveillance',
 }
 
 /** Maps each condition key to its category for client-side filtering. */
