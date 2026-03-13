@@ -84,6 +84,7 @@ export function ConditionIntakeWizard() {
         </div>
         <button
           onClick={clearSelection}
+          aria-label="Change selected condition"
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
             cursor: 'pointer', fontSize: '0.8rem',
@@ -165,7 +166,7 @@ function NavButtons({ onBack, onNext, onSubmit, submitLabel, nextDisabled, submi
   return (
     <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '2rem' }}>
       {onBack && (
-        <button onClick={onBack} style={{
+        <button onClick={onBack} aria-label="Go back to previous step" style={{
           background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)',
           color: 'rgba(255,255,255,0.7)', borderRadius: '10px', padding: '0.65rem 1.5rem',
           fontSize: '0.85rem', cursor: 'pointer', transition: 'all 0.2s',
@@ -177,6 +178,7 @@ function NavButtons({ onBack, onNext, onSubmit, submitLabel, nextDisabled, submi
         <button
           onClick={onNext}
           disabled={nextDisabled}
+          aria-label="Proceed to next step"
           style={{
             background: nextDisabled ? 'rgba(99,102,241,0.2)' : 'linear-gradient(135deg, #6366f1, #8b5cf6)',
             border: 'none', color: '#fff', borderRadius: '10px',
@@ -193,6 +195,7 @@ function NavButtons({ onBack, onNext, onSubmit, submitLabel, nextDisabled, submi
         <button
           onClick={onSubmit}
           disabled={submitDisabled}
+          aria-label="Submit condition profile and generate protocol"
           style={{
             background: submitDisabled ? 'rgba(34,197,94,0.2)' : 'linear-gradient(135deg, #22c55e, #16a34a)',
             border: 'none', color: '#fff', borderRadius: '10px',
