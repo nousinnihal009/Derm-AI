@@ -133,6 +133,7 @@ const App: React.FC = () => {
               <button
                 key={item.id}
                 className={`nav-link ${currentPage === item.id ? 'active' : ''}`}
+                aria-label={`Navigate to ${item.label} page`}
                 onClick={() => {
                   navigate(item.id)
                   if (item.id === 'medical') dismissMedicalBadge()
@@ -156,7 +157,11 @@ const App: React.FC = () => {
             ))}
           </div>
 
-          <button className="mobile-menu-btn" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
+          <button 
+            className="mobile-menu-btn" 
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"}
+          >
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               {mobileMenuOpen ? (
                 <path d="M6 18L18 6M6 6l12 12" strokeLinecap="round"/>
