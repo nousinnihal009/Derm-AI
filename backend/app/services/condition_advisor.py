@@ -243,7 +243,7 @@ class ConditionAdvisorEngine:
         care_plan = self._build_care_plan(kb_entry, req, severity)
 
         # Apply treatment conflict resolution
-        care_plan = self._resolve_conflicts(care_plan, req)
+        care_plan, new_avoids = self._resolve_conflicts(care_plan, req)
 
         # Education block
         education = ConditionEducation(
@@ -256,11 +256,12 @@ class ConditionAdvisorEngine:
             common_misconceptions=kb_entry.common_misconceptions,
         )
 
-        # Ingredients
+        # Ingredients (append any conflicts from care plan step removal)
         seek = [IngredientEntry(ingredient=ing, reason=reason)
                 for ing, reason in kb_entry.seek_ingredients]
         avoid = [IngredientEntry(ingredient=ing, reason=reason)
                  for ing, reason in kb_entry.avoid_ingredients]
+        avoid.extend(new_avoids)
 
         # Triggers
         triggers = [TriggerEntry(trigger=t, management_tip=tip, severity_impact=sev)
@@ -279,6 +280,18 @@ class ConditionAdvisorEngine:
         # Referral
         referral_recommended = kb_entry.referral_recommended
         referral_urgency = kb_entry.referral_urgency
+        
+        # Fix 14: Backend Referral Escalation
+        if req.severity == "severe":
+            referral_recommended = True
+            if referral_urgency in ["not_required", "routine"]:
+                referral_urgency = "soon"
+                
+        if req.symptom_duration in ["more_than_6_months", "chronic_recurring"]:
+            referral_recommended = True
+            if referral_urgency == "not_required":
+                referral_urgency = "routine"
+
         if req.condition in CATEGORY_D_CONDITIONS:
             referral_recommended = True
             referral_urgency = "immediate"
@@ -402,20 +415,48 @@ class ConditionAdvisorEngine:
 
     def _resolve_conflicts(
         self, plan: list[CarePlanStep], req: ConditionRequest
-    ) -> list[CarePlanStep]:
+    ) -> tuple[list[CarePlanStep], list[IngredientEntry]]:
         """
-        Remove or flag steps that conflict with current treatments.
-        Key rules:
-          - perioral_dermatitis: STOP steroids (mark but never remove the warning)
-          - phototherapy patients: extra SPF emphasis
-          - biologics patients: reduce immunostimulants
+        Check step.avoid_if against req.current_treatments.
+        If there's a match, remove the step from the plan and instead
+        return an IngredientEntry for the avoid list.
+        Also adds conditional notes for phototherapy, etc.
         """
         resolved: list[CarePlanStep] = []
+        new_avoids: list[IngredientEntry] = []
+
+        user_treatments = set(req.current_treatments)
 
         for step in plan:
+            # Check for conflict
+            conflict = False
+            for avoid_condition in step.avoid_if:
+                if avoid_condition in user_treatments:
+                    conflict = True
+                    break
+
+            if conflict:
+                # Remove step, add to avoid list
+                new_avoids.append(
+                    IngredientEntry(
+                        ingredient=step.category,
+                        reason=f"Conflicts with your current treatment ({', '.join(user_treatments.intersection(set(step.avoid_if)))}) — DO NOT use."
+                    )
+                )
+                continue
+
+            # Fix 11: perioral_dermatitis steroid warning
+            if req.condition == "perioral_dermatitis" and "prescription_topical" in req.current_treatments:
+                if step.category == "Treatment":
+                    step.recommendation = (
+                        f"⚠️ CRITICAL: STOP all topical steroids immediately! Topicals like hydrocortisone "
+                        f"can worsen perioral dermatitis. Consult your doctor for non-steroidal alternatives. "
+                        f"{step.recommendation}"
+                    )
+
             # If user is on prescription topical AND step recommends OTC of same type,
             # add a note but keep the step
-            if "prescription_topical" in req.current_treatments:
+            elif "prescription_topical" in req.current_treatments:
                 if step.category == "Treatment" and step.is_otc_available:
                     step.recommendation = (
                         f"{step.recommendation} (Note: You are using a prescription "
@@ -433,7 +474,7 @@ class ConditionAdvisorEngine:
 
             resolved.append(step)
 
-        return resolved
+        return resolved, new_avoids
 
     # ── Weather Context ───────────────────────────────────
 
