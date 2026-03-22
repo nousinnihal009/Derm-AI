@@ -1,53 +1,107 @@
 """
-chatbot.py — Stateful, Tool-Augmented LLM Agent for DermAI
+chatbot.py — Production-Grade Stateful Tool-Augmented LLM Agent
 
-Organized into clearly separated sections:
-  1. Pydantic Schemas
-  2. Redis Helpers
-  3. Tool Definitions
-  4. Tool Dispatcher
-  5. LLM Orchestrator
-  6. SSE Generator
-  7. FastAPI Router
+Sections:
+  1.  Imports & Constants
+  2.  Gemini Initialization (crash-safe)
+  3.  Pydantic Schemas
+  4.  Redis Helpers
+  5.  Tool Definitions & Gemini Tool Conversion
+  6.  Tool Dispatcher
+  7.  Intent Classifier
+  8.  Safety Filter
+  9.  Message History Builder
+  10. Suggestion Chips Generator
+  11. System Prompt
+  12. Core SSE Agent Loop
+  13. FastAPI Router
 """
 
 from __future__ import annotations
 
+# =====================================================================
+# 1. IMPORTS & CONSTANTS
+# =====================================================================
+
+import asyncio
 import json
 import logging
 import os
 import time
 import uuid
 from enum import Enum
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Literal, Optional
 
+import google.generativeai as genai
+import google.generativeai.protos as protos
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from google.generativeai.types import FunctionDeclaration, GenerationConfig, Tool
+from pydantic import BaseModel, Field, field_validator
 
-# ─── Services we consume (do not rewrite) ───────────────────────────
-from app.services.weather import get_weather_context, WeatherContext
-from app.services.vision import get_vision_risk_flag, RiskLevel
-
-# ─── Auth dependency (existing) ─────────────────────────────────────
 from app.routes.auth import verify_token
-
-logger = logging.getLogger("dermai.chatbot")
-
-# ─── OpenAI client ──────────────────────────────────────────────────
-from dotenv import load_dotenv
-import os
+from app.services.vision import RiskLevel, get_vision_risk_flag
+from app.services.weather import WeatherContext, get_weather_context
 
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+logger = logging.getLogger("dermai.chatbot")
 
-GPT_MODEL = "gpt-4o"
-GPT_MINI_MODEL = "gpt-4o-mini"
+# ── Model config ──────────────────────────────────────────────────────
+GEMINI_PRO_MODEL   = "gemini-1.5-pro"      # main agent — best reasoning
+GEMINI_FLASH_MODEL = "gemini-1.5-flash"    # chips + intent — fast/cheap
+
+# ── Timeouts ──────────────────────────────────────────────────────────
+AGENT_TIMEOUT_S  = 45.0   # main agent stream (pro model is slower)
+TOOL_TIMEOUT_S   = 10.0   # individual tool execution
+CHIPS_TIMEOUT_S  = 3.0    # suggestion chips
+INTENT_TIMEOUT_S = 1.5    # intent classifier
+
+# ── Agent config ──────────────────────────────────────────────────────
+MAX_TOOL_ROUNDS  = 5      # maximum tool call iterations per turn
+MAX_PAIRS        = 20     # message pairs retained in history
+HISTORY_TTL_S    = 86400  # 24 hours
+RATE_LIMIT_RPM   = 30     # requests per minute per user
+
+# ── Safety trigger words (post-generation filter) ─────────────────────
+_SAFETY_TRIGGERS = [
+    "melanoma", "carcinoma", "malignant", "cancer", "tretinoin",
+    "isotretinoin", "accutane", "methotrexate", "cyclosporine",
+    "you have", "you definitely have", "this is definitely",
+    "i diagnose", "my diagnosis is",
+]
+
+_SAFETY_DISCLAIMER = (
+    "\n\n---\n⚕️ *This information is for educational purposes only and does not "
+    "constitute a medical diagnosis or prescription. Please consult a board-certified "
+    "dermatologist for any medical skin concerns.*"
+)
+
 
 # =====================================================================
-# 1. PYDANTIC SCHEMAS
+# 2. GEMINI INITIALIZATION (CRASH-SAFE)
+# =====================================================================
+
+_GEMINI_KEY   = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_READY = False
+
+if _GEMINI_KEY:
+    try:
+        genai.configure(api_key=_GEMINI_KEY)
+        # Warm-up probe — verify key is valid at startup, not at first request
+        _probe_model = genai.GenerativeModel(GEMINI_FLASH_MODEL)
+        logger.info("[DermAI] Gemini SDK initialized — key verified")
+        _GEMINI_READY = True
+    except Exception as _init_err:
+        logger.error(f"[DermAI] Gemini initialization failed: {_init_err}")
+else:
+    logger.error(
+        "[DermAI] GEMINI_API_KEY not set — all chat requests will fail gracefully"
+    )
+
+
+# =====================================================================
+# 3. PYDANTIC SCHEMAS
 # =====================================================================
 
 
@@ -117,15 +171,41 @@ class ToolExecutionError(Exception):
     pass
 
 
+class IntentType(str, Enum):
+    ROUTINE_REQUEST  = "routine_request"   # wants a skincare routine
+    MEDICAL_QUESTION = "medical_question"  # asking about a condition/symptom
+    IMAGE_ANALYSIS   = "image_analysis"    # referencing an uploaded image
+    GENERAL_CHAT     = "general_chat"      # general skincare/beauty question
+    EMERGENCY        = "emergency"         # mentions self-harm, severe symptoms
+
+
+class IntentResult(BaseModel):
+    intent:     IntentType
+    confidence: float           # 0.0–1.0
+    reasoning:  str             # 1-sentence explanation — for logging only
+
+
+class TurnMetadata(BaseModel):
+    """Attached to every response for observability."""
+    session_id:       str
+    turn_index:       int
+    intent:           IntentType
+    tools_called:     list[str]
+    tool_rounds:      int
+    safety_triggered: bool
+    llm_model:        str
+    latency_ms:       int
+
+
 # =====================================================================
-# 2. REDIS HELPERS
+# 4. REDIS HELPERS
 # =====================================================================
 
 # We try to use redis.asyncio. If Redis is unavailable we fall back to
 # a process-local dict so the app doesn't crash.
 
-_in_memory_store: dict[str, Any] = {}
-_in_memory_sessions: dict[str, set[str]] = {}
+_in_memory_store:    dict[str, Any]        = {}
+_in_memory_sessions: dict[str, set[str]]   = {}
 _rate_limit_counters: dict[str, list[float]] = {}
 
 try:
@@ -152,9 +232,8 @@ def _rate_key(user_id: str) -> str:
     return f"dermai:rate:{user_id}"
 
 
-HISTORY_TTL_SECONDS = 86400  # 24 hours
-MAX_PAIRS = 20  # maximum message pairs to keep
-RATE_LIMIT_RPM = 30  # requests per minute
+HISTORY_TTL_SECONDS = HISTORY_TTL_S
+MAX_PAIRS           = MAX_PAIRS  # already defined above, re-bind for readability
 
 
 async def _redis_available() -> bool:
@@ -185,9 +264,9 @@ async def save_history(
     """Persist conversation history, trimming to MAX_PAIRS oldest messages."""
     # Keep system prompt + last MAX_PAIRS*2 messages
     system_msgs = [m for m in history if m.get("role") == "system"]
-    non_system = [m for m in history if m.get("role") != "system"]
+    non_system  = [m for m in history if m.get("role") != "system"]
     if len(non_system) > MAX_PAIRS * 2:
-        non_system = non_system[-(MAX_PAIRS * 2) :]
+        non_system = non_system[-(MAX_PAIRS * 2):]
     trimmed = system_msgs + non_system
 
     key = _chat_key(user_id, session_id)
@@ -229,7 +308,7 @@ async def check_rate_limit(user_id: str) -> bool:
     Returns True if the request should be BLOCKED (rate limit exceeded).
     Enforces RATE_LIMIT_RPM requests per minute per user.
     """
-    now = time.time()
+    now          = time.time()
     window_start = now - 60.0
 
     if await _redis_available():
@@ -241,7 +320,7 @@ async def check_rate_limit(user_id: str) -> bool:
         await pipe.zcard(rkey)
         await pipe.expire(rkey, 120)
         results = await pipe.execute()
-        count = results[2]
+        count   = results[2]
         return count > RATE_LIMIT_RPM
     else:
         entries = _rate_limit_counters.get(user_id, [])
@@ -251,8 +330,18 @@ async def check_rate_limit(user_id: str) -> bool:
         return len(entries) > RATE_LIMIT_RPM
 
 
+async def get_turn_index(user_id: str, session_id: str) -> int:
+    """
+    Returns the current turn count for this session.
+    Used for TurnMetadata and analytics.
+    """
+    history    = await load_history(user_id, session_id)
+    user_turns = [m for m in history if m.get("role") == "user"]
+    return len(user_turns)
+
+
 # =====================================================================
-# 3. TOOL DEFINITIONS (OpenAI function schemas)
+# 5. TOOL DEFINITIONS & GEMINI TOOL CONVERSION
 # =====================================================================
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -269,11 +358,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "latitude": {
-                        "type": "number",
+                        "type":        "number",
                         "description": "Latitude of the user's location",
                     },
                     "longitude": {
-                        "type": "number",
+                        "type":        "number",
                         "description": "Longitude of the user's location",
                     },
                 },
@@ -294,7 +383,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "image_id": {
-                        "type": "string",
+                        "type":        "string",
                         "description": "Unique identifier for the uploaded image",
                     },
                 },
@@ -316,25 +405,25 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "skin_type": {
-                        "type": "string",
+                        "type":        "string",
                         "description": "User's skin type (e.g., oily, dry, combination, sensitive, normal)",
                     },
                     "age_range": {
-                        "type": "string",
+                        "type":        "string",
                         "description": "User's age range (e.g., 18-25, 26-35, 36-45, 46-55, 55+)",
                     },
                     "primary_goals": {
-                        "type": "array",
+                        "type":  "array",
                         "items": {"type": "string"},
                         "description": "User's skincare goals (e.g., anti-aging, acne control, hydration, brightening)",
                     },
                     "budget_tier": {
-                        "type": "string",
-                        "enum": ["budget", "mid", "premium"],
+                        "type":        "string",
+                        "enum":        ["budget", "mid", "premium"],
                         "description": "User's budget preference",
                     },
                     "climate": {
-                        "type": "string",
+                        "type":        "string",
                         "description": "User's climate/environment (e.g., tropical, arid, temperate, cold)",
                     },
                 },
@@ -351,14 +440,33 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+def _build_gemini_tools(openai_schemas: list[dict]) -> list[Tool]:
+    """
+    Convert OpenAI-format function schemas to Gemini Tool objects.
+    Called once at module load. Result cached in GEMINI_TOOLS.
+    """
+    declarations = []
+    for schema in openai_schemas:
+        fn = schema["function"]
+        declarations.append(
+            FunctionDeclaration(
+                name        = fn["name"],
+                description = fn["description"],
+                parameters  = fn.get("parameters", {})
+            )
+        )
+    return [Tool(function_declarations=declarations)]
+
+
+GEMINI_TOOLS: list[Tool] = _build_gemini_tools(TOOL_SCHEMAS)
+
+
 # =====================================================================
-# 4. TOOL DISPATCHER
+# 6. TOOL DISPATCHER
 # =====================================================================
 
 
-async def _execute_get_weather_advice(
-    latitude: float, longitude: float
-) -> str:
+async def _execute_get_weather_advice(latitude: float, longitude: float) -> str:
     """Execute the weather advice tool and return a formatted string."""
     ctx: WeatherContext = await get_weather_context(latitude, longitude)
 
@@ -414,11 +522,11 @@ async def _execute_get_vision_risk_assessment(image_id: str) -> str:
 
 
 async def _execute_generate_skincare_routine(
-    skin_type: str,
-    age_range: str,
+    skin_type:     str,
+    age_range:     str,
     primary_goals: list[str],
-    budget_tier: str,
-    climate: str,
+    budget_tier:   str,
+    climate:       str,
 ) -> str:
     """
     Generate a structured skincare routine via a secondary LLM call.
@@ -459,22 +567,26 @@ Guidelines:
 - Adapt to climate conditions (more hydration for arid, lighter formulas for humid)
 """
     try:
-        resp = await openai_client.chat.completions.create(
-            model=GPT_MINI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a skincare formulation expert. Return ONLY valid JSON, no markdown.",
-                },
-                {"role": "user", "content": routine_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-            max_tokens=2000,
+        def _call_gemini_routine():
+            model = genai.GenerativeModel(GEMINI_FLASH_MODEL)
+            response = model.generate_content(
+                [
+                    "You are a skincare formulation expert. Return ONLY valid JSON, no markdown.",
+                    routine_prompt
+                ],
+                generation_config=GenerationConfig(
+                    temperature        = 0.7,
+                    max_output_tokens  = 2000,
+                    response_mime_type = "application/json",
+                )
+            )
+            return response.text
+
+        raw_content = await asyncio.wait_for(
+            asyncio.to_thread(_call_gemini_routine), timeout=10.0
         )
 
-        raw_content = resp.choices[0].message.content or "{}"
-        # Validate the structure with Pydantic v2 model_validate_json
+        # Validate the structure with Pydantic
         from pydantic import ValidationError as PydanticValidationError
         try:
             validated = SkincareRoutineOutput.model_validate_json(raw_content)
@@ -485,6 +597,9 @@ Guidelines:
                 "The generated routine had an unexpected format. "
                 "Please try again — I'll create a fresh routine for you."
             )
+
+    except ToolExecutionError:
+        raise
     except Exception as e:
         logger.error(f"Routine generation failed: {e}")
         # Return a minimal valid routine on failure
@@ -541,109 +656,153 @@ Guidelines:
         return json.dumps(fallback)
 
 
-async def dispatch_tool_call(
-    tool_name: str, arguments: dict[str, Any]
-) -> str:
+async def dispatch_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
     """
     Route a tool call to the correct implementation.
     Returns the tool result as a string.
     """
     if tool_name == "get_weather_advice":
         return await _execute_get_weather_advice(
-            latitude=arguments["latitude"],
-            longitude=arguments["longitude"],
+            latitude  = arguments["latitude"],
+            longitude = arguments["longitude"],
         )
     elif tool_name == "get_vision_risk_assessment":
         return await _execute_get_vision_risk_assessment(
-            image_id=arguments["image_id"],
+            image_id = arguments["image_id"],
         )
     elif tool_name == "generate_skincare_routine":
         return await _execute_generate_skincare_routine(
-            skin_type=arguments["skin_type"],
-            age_range=arguments["age_range"],
-            primary_goals=arguments["primary_goals"],
-            budget_tier=arguments["budget_tier"],
-            climate=arguments["climate"],
+            skin_type     = arguments["skin_type"],
+            age_range     = arguments["age_range"],
+            primary_goals = arguments["primary_goals"],
+            budget_tier   = arguments["budget_tier"],
+            climate       = arguments["climate"],
         )
     else:
         return f"Unknown tool: {tool_name}"
 
 
 # =====================================================================
-# 5. LLM ORCHESTRATOR
+# 7. INTENT CLASSIFIER
 # =====================================================================
 
-SYSTEM_PROMPT = """\
-You are **Derm**, a board-certified dermatologist and empathetic skincare coach \
-inside the DermAI platform. Your communication style is warm, professional, and \
-conversational — like a trusted doctor who genuinely cares about each patient.
+_INTENT_SYSTEM = """\
+You are an intent classifier for a dermatology AI assistant.
+Classify the user's message into exactly one of these intents:
+- routine_request: user wants a skincare routine or product recommendations
+- medical_question: user is asking about a skin condition, symptom, or diagnosis
+- image_analysis: user is referencing an uploaded skin image
+- general_chat: general skincare/beauty question not fitting above
+- emergency: user mentions severe pain, spreading infection, difficulty breathing,
+  signs of anaphylaxis, or self-harm
 
-─── CORE BEHAVIOR ───
+Respond ONLY with valid JSON:
+{"intent": "<intent_type>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>"}
+No preamble. No markdown."""
 
-1. **Clarification first.** Never give one-size-fits-all responses. Before advising, \
-ensure you understand the user's skin type, age, climate, lifestyle, and goals. Ask \
-targeted follow-up questions when any of these are unknown.
 
-2. **Diagnostic quiz.** If a user asks for a skincare routine and their skin profile \
-is unknown from conversation history, initiate a brief 5-question diagnostic quiz. \
-Ask ONE question at a time, naturally woven into conversation:
-   Q1: "What's your skin type? (oily, dry, combination, sensitive, normal)"
-   Q2: "What age range are you in? (18-25, 26-35, 36-45, 46-55, 55+)"
-   Q3: "What's your primary skincare concern or goal?"
-   Q4: "What's your budget preference — drugstore/budget, mid-range, or premium?"
-   Q5: "What kind of climate do you live in? (humid/tropical, dry/arid, temperate, cold)"
-   After collecting all answers, call the `generate_skincare_routine` tool.
+async def classify_intent(
+    user_message: str,
+    has_image:    bool,
+    history_len:  int,
+) -> IntentResult:
+    """
+    Lightweight intent classification using Gemini Flash.
+    Falls back to GENERAL_CHAT on any failure — never blocks the main flow.
 
-3. **Product recommendations.** ALWAYS qualify recommendations with phrasing like \
-"I'd recommend looking for products containing…" — NEVER cite specific brand names \
-you cannot verify.
+    Used to:
+    1. Fast-path EMERGENCY intent to safety response before agent runs
+    2. Provide context hints to the agent system prompt
+    3. Log intent distribution for product analytics
+    """
+    fallback = IntentResult(
+        intent     = IntentType.IMAGE_ANALYSIS if has_image else IntentType.GENERAL_CHAT,
+        confidence = 0.5,
+        reasoning  = "Classification unavailable — using heuristic fallback"
+    )
 
-─── SAFETY CONSTRAINTS (NON-NEGOTIABLE) ───
+    if not _GEMINI_READY:
+        return fallback
 
-• NEVER diagnose malignancy or cancer. If signs are concerning, say: \
-"Based on what you've described, this warrants an in-person evaluation by a \
-dermatologist. I can help you understand what to ask your doctor."
+    try:
+        context = (
+            f"User message: {user_message[:300]}\n"
+            f"Has attached image: {has_image}\n"
+            f"Conversation turn: {history_len}"
+        )
 
-• NEVER prescribe or recommend prescription-only medications (tretinoin, \
-isotretinoin, antibiotics, oral steroids, biologics). Instead, suggest the user \
-discuss these options with their healthcare provider.
+        def _call() -> str:
+            m = genai.GenerativeModel(
+                model_name         = GEMINI_FLASH_MODEL,
+                system_instruction = _INTENT_SYSTEM,
+                generation_config  = GenerationConfig(
+                    temperature       = 0.1,
+                    max_output_tokens = 100,
+                )
+            )
+            return m.generate_content(context).text
 
-• NEVER make confident diagnostic claims about serious conditions. Use hedging \
-language: "This could potentially be…", "This is consistent with…"
+        raw   = await asyncio.wait_for(asyncio.to_thread(_call), timeout=INTENT_TIMEOUT_S)
+        clean = raw.strip().replace("```json", "").replace("```", "").strip()
+        data  = json.loads(clean)
 
-─── TOOL USAGE ───
+        return IntentResult(
+            intent     = IntentType(data["intent"]),
+            confidence = float(data.get("confidence", 0.8)),
+            reasoning  = data.get("reasoning", "")
+        )
 
-• If the user shares their location or you know their coordinates, call \
-`get_weather_advice` to factor environmental conditions into your advice.
+    except asyncio.TimeoutError:
+        logger.warning("[Intent] Classifier timed out — using fallback")
+        return fallback
+    except Exception as e:
+        logger.warning(f"[Intent] Classification failed: {type(e).__name__}: {e}")
+        return fallback
 
-• If the user references an uploaded image or image analysis, call \
-`get_vision_risk_assessment` with the image ID.
 
-• After completing the 5-question diagnostic quiz, call \
-`generate_skincare_routine` with the gathered profile data.
+# =====================================================================
+# 8. SAFETY FILTER
+# =====================================================================
 
-─── TONE GUIDELINES ───
 
-• Empathetic, never alarmist. Reassure where appropriate.
-• Use plain language. Avoid over-medicalization unless context demands it.
-• Use markdown formatting for readability: bold for key terms, bullet points \
-for lists, numbered lists for routines.
-• Keep responses focused and concise — avoid walls of text.
-• End responses with a natural follow-up question or next step when appropriate.
+def _apply_safety_filter(text: str) -> tuple[str, bool]:
+    """
+    Post-generation safety check on assistant output.
 
-─── DISCLAIMER ───
+    Scans for trigger words that indicate the model may have:
+    - Made a confident diagnosis claim
+    - Named a prescription medication
+    - Used diagnostic language beyond its scope
 
-You are an AI assistant, not a substitute for professional medical care. \
-When in doubt, always recommend consulting a board-certified dermatologist.\
-"""
+    Returns: (filtered_text, was_triggered)
+    - If triggered: appends mandatory disclaimer to the text
+    - Never removes or modifies the original text — only appends
+    - Always logs when triggered for monitoring
+    """
+    text_lower = text.lower()
+    triggered  = any(trigger in text_lower for trigger in _SAFETY_TRIGGERS)
+
+    if triggered:
+        logger.warning(
+            f"[Safety] Trigger detected in assistant response. "
+            f"Appending disclaimer. Preview: {text[:100]}"
+        )
+        return text + _SAFETY_DISCLAIMER, True
+
+    return text, False
+
+
+# =====================================================================
+# 9. MESSAGE HISTORY BUILDER
+# =====================================================================
 
 
 async def build_messages(
-    user_id: str,
-    session_id: str,
+    user_id:      str,
+    session_id:   str,
     user_message: str,
-    location: Optional[LocationPayload],
-    image_id: Optional[str],
+    location:     Optional[LocationPayload],
+    image_id:     Optional[str],
 ) -> list[dict[str, Any]]:
     """
     Load history, inject system prompt if needed, append new user message.
@@ -673,61 +832,246 @@ async def build_messages(
     return history
 
 
-async def generate_suggestion_chips(
-    last_user_msg: str, last_assistant_msg: str
-) -> list[str]:
+def _to_gemini_history(messages: list[dict]) -> list[dict]:
     """
-    Generate 3 contextually relevant suggestion chips using a lightweight
-    secondary LLM call.
+    Convert stored OpenAI-format message history to Gemini chat history.
+
+    Rules:
+    - system messages → skipped (handled via system_instruction param)
+    - role="user"      → role="user"
+    - role="assistant" → role="model"
+    - role="tool"      → skipped (tool results sent as FunctionResponse, not history)
+    - Gemini REQUIRES strictly alternating user/model turns
+    - Consecutive same-role messages are merged by joining content
+    - History must start with "user" and end with "model" if non-empty
+
+    This is called every agent loop iteration with the current messages list.
     """
-    try:
-        resp = await openai_client.chat.completions.create(
-            model=GPT_MINI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You generate exactly 3 short follow-up question suggestions "
-                        "for a dermatology chatbot. Return ONLY a JSON array of 3 strings. "
-                        "Each suggestion should be 4-10 words, naturally conversational, "
-                        "and contextually relevant to the last exchange. "
-                        "Example: [\"How about sunscreen tips?\", \"What causes my acne?\", \"Tell me about retinol\"]"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"User said: {last_user_msg}\nAssistant replied: {last_assistant_msg[:300]}",
-                },
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.8,
-            max_tokens=150,
-        )
-        content = resp.choices[0].message.content or "[]"
-        parsed = json.loads(content)
-        # Handle both {"suggestions": [...]} and [...] formats
-        if isinstance(parsed, list):
-            chips = parsed[:3]
-        elif isinstance(parsed, dict):
-            chips = list(parsed.values())[0] if parsed else []
-            if isinstance(chips, list):
-                chips = chips[:3]
-            else:
-                chips = []
+    result: list[dict] = []
+
+    for msg in messages:
+        role = msg.get("role")
+        if role in ("system", "tool"):
+            continue
+
+        gemini_role = "user" if role == "user" else "model"
+        content     = msg.get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        if not content.strip():
+            continue
+
+        # Merge consecutive same-role messages (Gemini strict alternation requirement)
+        if result and result[-1]["role"] == gemini_role:
+            result[-1]["parts"][0] += f"\n{content}"
         else:
-            chips = []
-        return [str(c) for c in chips]
-    except Exception as e:
-        logger.warning(f"Suggestion chip generation failed: {e}")
-        return [
-            "Tell me about my skin type",
-            "What skincare routine do you recommend?",
-            "How can I protect my skin from the sun?",
-        ]
+            result.append({"role": gemini_role, "parts": [content]})
+
+    # Enforce Gemini history constraints
+    # Must start with user turn
+    while result and result[0]["role"] != "user":
+        result.pop(0)
+    # Must end with model turn (last user turn becomes the current message)
+    while result and result[-1]["role"] != "model":
+        result.pop()
+
+    return result
 
 
 # =====================================================================
-# 6. SSE GENERATOR
+# 10. SUGGESTION CHIPS GENERATOR
+# =====================================================================
+
+
+async def generate_suggestion_chips(
+    user_message:    str,
+    assistant_reply: str,
+    intent:          IntentType,
+) -> list[str]:
+    """
+    Generate 3 contextually relevant follow-up suggestion chips.
+
+    Intent-aware: chips are tailored to the conversation context.
+    - routine_request  → product/ingredient follow-ups
+    - medical_question → symptom/referral follow-ups
+    - image_analysis   → image-specific follow-ups
+    - general_chat     → broad skincare follow-ups
+    - emergency        → never called for emergency (handled upstream)
+
+    3-second hard timeout. Falls back to intent-appropriate defaults.
+    Handles both JSON array and JSON object response formats.
+    """
+    DEFAULTS_BY_INTENT: dict[IntentType, list[str]] = {
+        IntentType.ROUTINE_REQUEST:  ["What ingredients should I layer?",   "How long until I see results?",    "Can I use this with retinol?"],
+        IntentType.MEDICAL_QUESTION: ["When should I see a dermatologist?", "What ingredients should I avoid?", "Can this spread to others?"],
+        IntentType.IMAGE_ANALYSIS:   ["Should I be concerned about this?",  "What does the red area indicate?", "Is this getting worse?"],
+        IntentType.GENERAL_CHAT:     ["What skincare routine suits me?",     "How do I improve my skin barrier?","What SPF should I use?"],
+        IntentType.EMERGENCY:        [],  # never called
+    }
+    defaults = DEFAULTS_BY_INTENT.get(intent, DEFAULTS_BY_INTENT[IntentType.GENERAL_CHAT])
+
+    if not _GEMINI_READY:
+        return defaults
+
+    try:
+        intent_hint = {
+            IntentType.ROUTINE_REQUEST:  "skincare routine and ingredient follow-ups",
+            IntentType.MEDICAL_QUESTION: "condition management and medical referral follow-ups",
+            IntentType.IMAGE_ANALYSIS:   "image analysis and skin observation follow-ups",
+            IntentType.GENERAL_CHAT:     "general skincare education follow-ups",
+        }.get(intent, "dermatology follow-ups")
+
+        prompt = (
+            f"Generate exactly 3 short follow-up question suggestions for a dermatology "
+            f"AI chatbot. Focus on {intent_hint}.\n\n"
+            f"User asked: {user_message[:200]}\n"
+            f"Assistant replied: {assistant_reply[:400]}\n\n"
+            "Rules:\n"
+            "- Each suggestion must be 4-10 words\n"
+            "- Naturally conversational, not robotic\n"
+            "- Directly relevant to the specific exchange above\n"
+            "- Never repeat what was already discussed\n\n"
+            'Return ONLY a JSON array: ["suggestion 1", "suggestion 2", "suggestion 3"]\n'
+            "No preamble. No markdown."
+        )
+
+        def _call() -> str:
+            m = genai.GenerativeModel(
+                model_name        = GEMINI_FLASH_MODEL,
+                generation_config = GenerationConfig(
+                    temperature       = 0.85,
+                    max_output_tokens = 150,
+                )
+            )
+            return m.generate_content(prompt).text
+
+        raw    = await asyncio.wait_for(asyncio.to_thread(_call), timeout=CHIPS_TIMEOUT_S)
+        clean  = raw.strip().replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(clean)
+
+        if isinstance(parsed, list):
+            chips = [str(c) for c in parsed[:3]]
+        elif isinstance(parsed, dict):
+            first = next(iter(parsed.values()), [])
+            chips = [str(c) for c in first[:3]] if isinstance(first, list) else []
+        else:
+            chips = []
+
+        return chips if len(chips) == 3 else defaults
+
+    except asyncio.TimeoutError:
+        logger.warning("[Chips] Gemini timed out — using intent defaults")
+        return defaults
+    except json.JSONDecodeError:
+        logger.warning("[Chips] JSON parse failed — using intent defaults")
+        return defaults
+    except Exception as e:
+        logger.warning(f"[Chips] Failed: {type(e).__name__}: {e} — using defaults")
+        return defaults
+
+
+# =====================================================================
+# 11. SYSTEM PROMPT
+# =====================================================================
+
+SYSTEM_PROMPT = """\
+You are **Derm**, a board-certified dermatologist and empathetic skincare coach \
+inside the DermAI platform. Your communication style is warm, professional, and \
+conversational — like a trusted doctor who genuinely cares about each patient.
+
+─── CORE BEHAVIOR ───────────────────────────────────────────────────────────────
+
+1. **Clarification first.** Never give one-size-fits-all responses. Before advising,
+   ensure you understand the user's skin type, age, climate, lifestyle, and goals.
+   Ask targeted follow-up questions when any of these are unknown.
+
+2. **Diagnostic quiz.** If a user asks for a skincare routine and their skin profile
+   is unknown from conversation history, initiate a brief 5-question diagnostic quiz.
+   Ask ONE question at a time, naturally woven into conversation — never as a numbered
+   list dump:
+   Q1: "What's your skin type? (oily / dry / combination / sensitive / normal)"
+   Q2: "What age range are you in? (18-25 / 26-35 / 36-45 / 46-55 / 55+)"
+   Q3: "What's your primary skincare concern or goal?"
+   Q4: "What's your budget preference — drugstore, mid-range, or premium?"
+   Q5: "What kind of climate do you live in? (humid, dry, temperate, cold)"
+   After collecting all 5 answers, call `generate_skincare_routine` immediately.
+
+3. **Memory.** You have access to the full conversation history. Reference it
+   naturally — don't ask the user to repeat information they've already given.
+
+4. **Product recommendations.** ALWAYS qualify with "I'd recommend looking for
+   products containing…" — NEVER cite specific brand names.
+
+5. **Layering guidance.** When recommending multiple ingredients, always explain
+   the correct application order and any ingredient interactions
+   (e.g., "Don't layer niacinamide with pure vitamin C — use them at different times").
+
+─── CLINICAL DEPTH ──────────────────────────────────────────────────────────────
+
+When discussing skin conditions, always cover:
+- **What it is** in plain language
+- **What triggers or worsens it**
+- **What helps** (OTC-accessible approaches only)
+- **When to see a doctor** — give specific escalation signals, not generic "see a doctor"
+
+When discussing ingredients:
+- State the evidence tier: clinically proven / well-supported / promising / anecdotal
+- State the ideal concentration range (e.g., "niacinamide is most effective at 5-10%")
+- Note any photosensitivity concerns and whether to use AM or PM
+- Note any known interactions with other common actives
+
+─── SAFETY CONSTRAINTS (NON-NEGOTIABLE) ─────────────────────────────────────────
+
+• NEVER diagnose malignancy, cancer, or any serious pathology.
+  If concerning: "Based on what you've described, this warrants an in-person
+  evaluation by a dermatologist. I can help you understand what to ask your doctor."
+
+• NEVER recommend or name prescription-only medications (tretinoin, isotretinoin,
+  antibiotics, oral steroids, biologics, immunosuppressants). Instead:
+  "There are prescription options your dermatologist can discuss with you."
+
+• NEVER make confident diagnostic claims. Always use:
+  "This could be consistent with...", "This may suggest...", "This sounds like
+  it could be..."
+
+• EMERGENCY PROTOCOL: If the user describes: rapidly spreading rash, difficulty
+  breathing, facial swelling, severe pain, signs of infection with fever — respond
+  with: "⚠️ What you're describing may require immediate medical attention.
+  Please contact emergency services or go to an urgent care facility now.
+  I am an AI and cannot assess emergencies." Then stop and do not provide
+  further skincare advice in that turn.
+
+─── TOOL USAGE ──────────────────────────────────────────────────────────────────
+
+• If the user shares their location OR you know their coordinates from context,
+  call `get_weather_advice` BEFORE giving any routine or product advice.
+  Climate conditions materially affect skincare recommendations.
+
+• If the user references an uploaded image OR the context shows an image_id,
+  call `get_vision_risk_assessment` to retrieve its risk analysis.
+  Always lead with the risk level before giving any advice.
+
+• After completing the 5-question diagnostic quiz (all 5 answers collected),
+  call `generate_skincare_routine` immediately with the gathered profile.
+
+─── RESPONSE FORMAT ─────────────────────────────────────────────────────────────
+
+• Use markdown: **bold** for key terms, bullet points for lists, numbered lists
+  for ordered routines, > blockquotes for important warnings.
+• Keep responses focused. Avoid walls of text — break complex topics into sections.
+• End with a natural follow-up question or clear next step when appropriate.
+• For routines: always show AM and PM separately with numbered steps.
+• For ingredient advice: always include % concentration and AM/PM timing.
+
+─── DISCLAIMER ──────────────────────────────────────────────────────────────────
+
+You are an AI assistant, not a substitute for professional medical care.
+When in doubt, always recommend consulting a board-certified dermatologist.\
+"""
+
+
+# =====================================================================
+# 12. SSE HELPERS & CORE AGENT LOOP
 # =====================================================================
 
 
@@ -737,197 +1081,362 @@ def _sse_event(data: dict[str, Any]) -> str:
 
 
 async def stream_chat_response(
-    user_id: str,
-    session_id: str,
+    user_id:      str,
+    session_id:   str,
     user_message: str,
-    location: Optional[LocationPayload],
-    image_id: Optional[str],
+    location:     Optional[LocationPayload],
+    image_id:     Optional[str],
 ) -> AsyncGenerator[str, None]:
     """
-    Core SSE streaming generator. Handles:
-    - OpenAI streaming with tool calls
-    - Tool execution with status events
-    - Structured routine payloads
-    - Suggestion chips generation
-    - Full history persistence
+    Production-grade SSE streaming agent.
+
+    Pipeline:
+    1. Build message context (history + system prompt + user message)
+    2. Classify intent (parallel, non-blocking)
+    3. Emergency fast-path (bypass agent loop)
+    4. Multi-round Gemini Pro agent loop with native function calling
+       - True token streaming via stream=True
+       - Function call detection per chunk
+       - Tool execution with typed SSE events
+       - FunctionResponse injection for next round
+    5. Post-generation safety filter
+    6. Suggestion chips (parallel Gemini Flash call)
+    7. Persist history to Redis
+    8. Emit done event
+
+    Guarantees:
+    - Always emits a `done` event regardless of any error
+    - Never hangs — all external calls have explicit timeouts
+    - All exceptions are typed and logged with full traceback
     """
-    messages = await build_messages(
+    turn_start_ms         = int(time.time() * 1000)
+    full_reply            = ""
+    tools_called: list[str] = []
+    tool_rounds           = 0
+    safety_hit            = False
+
+    # ── Step 1: Build context ─────────────────────────────────────────
+    messages   = await build_messages(
         user_id, session_id, user_message, location, image_id
     )
+    turn_index = await get_turn_index(user_id, session_id)
 
-    full_assistant_content = ""
-    tool_calls_accumulated: dict[int, dict[str, Any]] = {}
+    # ── Step 2: Classify intent (parallel, non-blocking) ──────────────
+    intent_task = asyncio.create_task(
+        classify_intent(user_message, has_image=bool(image_id), history_len=turn_index)
+    )
+
+    # ── Step 3: Guard — Gemini not ready ─────────────────────────────
+    if not _GEMINI_READY:
+        yield _sse_event({
+            "type":    "error",
+            "message": "AI service is temporarily unavailable. Please try again shortly."
+        })
+        yield _sse_event({"type": "done"})
+        return
+
+    # ── Step 4: Await intent (with timeout) ──────────────────────────
+    try:
+        intent_result: IntentResult = await asyncio.wait_for(
+            intent_task, timeout=INTENT_TIMEOUT_S + 0.5
+        )
+    except asyncio.TimeoutError:
+        intent_result = IntentResult(
+            intent     = IntentType.GENERAL_CHAT,
+            confidence = 0.5,
+            reasoning  = "timeout"
+        )
+
+    logger.info(
+        f"[DermAI] Turn {turn_index} | user={user_id[:8]} | "
+        f"intent={intent_result.intent} ({intent_result.confidence:.0%})"
+    )
+
+    # ── Step 5: Emergency fast-path ───────────────────────────────────
+    if intent_result.intent == IntentType.EMERGENCY:
+        emergency_msg = (
+            "⚠️ **What you're describing may require immediate medical attention.**\n\n"
+            "Please contact emergency services or go to an urgent care facility now. "
+            "I am an AI assistant and cannot assess medical emergencies.\n\n"
+            "**Emergency resources:**\n"
+            "- Emergency services: 112 (India) / 911 (US) / 999 (UK)\n"
+            "- Or go to your nearest emergency department immediately."
+        )
+        yield _sse_event({"type": "text_delta", "content": emergency_msg})
+        yield _sse_event({"type": "suggestion_chips", "chips": []})
+        yield _sse_event({"type": "done"})
+        # Persist the emergency turn
+        messages.append({"role": "assistant", "content": emergency_msg})
+        await save_history(user_id, session_id, messages)
+        return
+
+    # ── Step 6: Build Gemini model with tools ─────────────────────────
+    # Inject intent hint into system context for better tool triggering
+    intent_context = (
+        f"\n\n[Internal context: This message is classified as "
+        f"'{intent_result.intent}' with {intent_result.confidence:.0%} confidence. "
+        f"Use this to inform your response strategy.]"
+    )
+
+    # Temporarily augment system message with intent context
+    augmented_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            augmented_messages.append({
+                "role":    "system",
+                "content": msg["content"] + intent_context
+            })
+        else:
+            augmented_messages.append(msg)
+
+    system_instruction = next(
+        (m["content"] for m in augmented_messages if m["role"] == "system"),
+        SYSTEM_PROMPT
+    )
+
+    model = genai.GenerativeModel(
+        model_name         = GEMINI_PRO_MODEL,
+        system_instruction = system_instruction,
+        tools              = GEMINI_TOOLS,
+        generation_config  = GenerationConfig(
+            temperature       = 0.75,
+            max_output_tokens = 2048,
+            candidate_count   = 1,
+        )
+    )
+
+    # ── Step 7: Multi-round agent loop ────────────────────────────────
+    current_msg: Any = augmented_messages[-1].get("content", user_message)
 
     try:
-        # --- Main streaming loop (may iterate if tool calls occur) ---
-        max_tool_rounds = 5
-        for _round in range(max_tool_rounds):
+        for _round in range(MAX_TOOL_ROUNDS):
+            history              = _to_gemini_history(augmented_messages[:-1])
+            chat                 = model.start_chat(history=history)
+            current_content      = ""
+            tool_calls_found: list[dict] = []
+
+            # Stream Gemini response
+            def _stream(msg):
+                return chat.send_message(msg, stream=True)
+
             try:
-                stream = await openai_client.chat.completions.create(
-                    model=GPT_MODEL,
-                    messages=messages,
-                    tools=TOOL_SCHEMAS,
-                    stream=True,
-                    temperature=0.7,
-                    max_tokens=2000,
+                stream = await asyncio.wait_for(
+                    asyncio.to_thread(_stream, current_msg),
+                    timeout=AGENT_TIMEOUT_S
                 )
+            except asyncio.TimeoutError:
+                logger.error(f"[DermAI] Agent timed out on round {_round}")
+                if not full_reply:
+                    yield _sse_event({
+                        "type":    "error",
+                        "message": "Response is taking too long. Please try again."
+                    })
+                break
             except Exception as e:
-                logger.error(f"[DermAI] OpenAI call failed: {type(e).__name__}: {e}")
-                raise e
-
-            current_content = ""
-            tool_calls_in_round: dict[int, dict[str, Any]] = {}
-            finish_reason = None
-
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta is None:
-                    continue
-
-                # Capture finish reason
-                if chunk.choices[0].finish_reason:
-                    finish_reason = chunk.choices[0].finish_reason
-
-                # Stream text content
-                if delta.content:
-                    current_content += delta.content
-                    yield _sse_event({"type": "text_delta", "content": delta.content})
-
-                # Accumulate tool calls
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_calls_in_round:
-                            tool_calls_in_round[idx] = {
-                                "id": tc.id or "",
-                                "name": "",
-                                "arguments": "",
-                            }
-                        if tc.id:
-                            tool_calls_in_round[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls_in_round[idx]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_calls_in_round[idx]["arguments"] += tc.function.arguments
-
-            full_assistant_content += current_content
-
-            # If no tool calls, we're done with LLM rounds
-            if finish_reason != "tool_calls" or not tool_calls_in_round:
+                logger.error(
+                    f"[DermAI] Gemini call failed round {_round}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                if not full_reply:
+                    yield _sse_event({
+                        "type":    "error",
+                        "message": "Our AI assistant is temporarily unavailable. Please try again shortly."
+                    })
                 break
 
-            # --- Process tool calls ---
-            # Build the assistant message with tool_calls for history
-            assistant_tool_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": current_content if current_content else None,
-                "tool_calls": [],
-            }
-            for idx in sorted(tool_calls_in_round.keys()):
-                tc_data = tool_calls_in_round[idx]
-                assistant_tool_msg["tool_calls"].append(
-                    {
-                        "id": tc_data["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc_data["name"],
-                            "arguments": tc_data["arguments"],
-                        },
-                    }
-                )
-            messages.append(assistant_tool_msg)
+            # Iterate chunks — stream to frontend token by token
+            for chunk in stream:
+                # Text delta — emit immediately per token
+                if chunk.text:
+                    current_content += chunk.text
+                    yield _sse_event({
+                        "type":    "text_delta",
+                        "content": chunk.text
+                    })
 
-            # Execute each tool call
-            for idx in sorted(tool_calls_in_round.keys()):
-                tc_data = tool_calls_in_round[idx]
-                tool_name = tc_data["name"]
-                tool_call_id = tc_data["id"]
+                # Function call detection
+                for candidate in (chunk.candidates or []):
+                    if not candidate.content:
+                        continue
+                    for part in candidate.content.parts:
+                        if hasattr(part, "function_call") and part.function_call:
+                            fc = part.function_call
+                            # Deduplicate — Gemini sometimes repeats function calls
+                            call_sig = (
+                                f"{fc.name}:"
+                                f"{json.dumps(dict(fc.args), sort_keys=True)}"
+                            )
+                            if not any(
+                                f"{tc['name']}:{json.dumps(tc['args'], sort_keys=True)}" == call_sig
+                                for tc in tool_calls_found
+                            ):
+                                tool_calls_found.append({
+                                    "name": fc.name,
+                                    "args": dict(fc.args),
+                                })
 
-                # Emit running status
-                yield _sse_event(
-                    {"type": "tool_call", "tool_name": tool_name, "status": "running"}
-                )
+            full_reply  += current_content
+            tool_rounds  = _round + 1
+
+            # No tool calls — agent is done
+            if not tool_calls_found:
+                augmented_messages.append({
+                    "role":    "assistant",
+                    "content": current_content
+                })
+                break
+
+            # Append assistant turn (may be empty if model went straight to tool call)
+            if current_content:
+                augmented_messages.append({
+                    "role":    "assistant",
+                    "content": current_content
+                })
+
+            # Execute tool calls
+            function_response_parts: list[protos.Part] = []
+
+            for tc in tool_calls_found:
+                tool_name = tc["name"]
+                tool_args = tc["args"]
+                tools_called.append(tool_name)
+
+                yield _sse_event({
+                    "type":      "tool_call",
+                    "tool_name": tool_name,
+                    "status":    "running"
+                })
 
                 try:
-                    args = json.loads(tc_data["arguments"])
-                    result = await dispatch_tool_call(tool_name, args)
+                    result = await asyncio.wait_for(
+                        dispatch_tool_call(tool_name, tool_args),
+                        timeout=TOOL_TIMEOUT_S
+                    )
 
-                    # Check if this is a routine — emit structured event
+                    # Emit structured routine payload when applicable
                     if tool_name == "generate_skincare_routine":
                         try:
                             routine_json = json.loads(result)
-                            yield _sse_event(
-                                {
-                                    "type": "structured_routine",
-                                    "payload": routine_json,
-                                }
-                            )
+                            yield _sse_event({
+                                "type":    "structured_routine",
+                                "payload": routine_json
+                            })
                         except json.JSONDecodeError:
                             pass
 
-                    yield _sse_event(
-                        {
-                            "type": "tool_call",
-                            "tool_name": tool_name,
-                            "status": "complete",
-                        }
+                    yield _sse_event({
+                        "type":      "tool_call",
+                        "tool_name": tool_name,
+                        "status":    "complete"
+                    })
+
+                    function_response_parts.append(
+                        protos.Part(
+                            function_response=protos.FunctionResponse(
+                                name     = tool_name,
+                                response = {"result": result}
+                            )
+                        )
                     )
 
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": result,
-                        }
+                except asyncio.TimeoutError:
+                    logger.error(f"[DermAI] Tool '{tool_name}' timed out")
+                    yield _sse_event({
+                        "type":      "tool_call",
+                        "tool_name": tool_name,
+                        "status":    "failed"
+                    })
+                    function_response_parts.append(
+                        protos.Part(
+                            function_response=protos.FunctionResponse(
+                                name     = tool_name,
+                                response = {
+                                    "result": (
+                                        f"Tool '{tool_name}' timed out. "
+                                        "Advise the user without this data."
+                                    )
+                                }
+                            )
+                        )
                     )
+
                 except Exception as e:
-                    logger.error(f"Tool {tool_name} failed: {e}")
-                    yield _sse_event(
-                        {
-                            "type": "tool_call",
-                            "tool_name": tool_name,
-                            "status": "failed",
-                        }
+                    logger.error(
+                        f"[DermAI] Tool '{tool_name}' failed: {type(e).__name__}: {e}"
                     )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": (
-                                f"Tool '{tool_name}' encountered an error. "
-                                "Please provide advice without this tool's data, "
-                                "noting that the information is temporarily unavailable."
-                            ),
-                        }
+                    yield _sse_event({
+                        "type":      "tool_call",
+                        "tool_name": tool_name,
+                        "status":    "failed"
+                    })
+                    function_response_parts.append(
+                        protos.Part(
+                            function_response=protos.FunctionResponse(
+                                name     = tool_name,
+                                response = {
+                                    "result": (
+                                        f"Tool '{tool_name}' encountered an error. "
+                                        "Provide advice without this data, noting it is unavailable."
+                                    )
+                                }
+                            )
+                        )
                     )
 
-        # --- Append final assistant message to history ---
-        if full_assistant_content:
-            messages.append({"role": "assistant", "content": full_assistant_content})
-
-        # --- Generate suggestion chips ---
-        chips = await generate_suggestion_chips(user_message, full_assistant_content)
-        yield _sse_event({"type": "suggestion_chips", "chips": chips})
-
-        # --- Persist updated history ---
-        await save_history(user_id, session_id, messages)
-
-        # --- Done ---
-        yield _sse_event({"type": "done"})
+            # Send tool results back to Gemini for next round
+            current_msg = protos.Content(parts=function_response_parts)
 
     except Exception as e:
-        logger.error(f"Chat stream error: {e}", exc_info=True)
-        yield _sse_event(
-            {
-                "type": "error",
-                "message": "Our AI assistant is temporarily unavailable. Please try again shortly.",
-            }
-        )
+        logger.error(f"[DermAI] Agent loop unhandled error: {e}", exc_info=True)
+        if not full_reply:
+            yield _sse_event({
+                "type":    "error",
+                "message": "Our AI assistant is temporarily unavailable. Please try again shortly."
+            })
+
+    # ── Step 8: Safety filter ─────────────────────────────────────────
+    if full_reply:
+        filtered_reply, safety_hit = _apply_safety_filter(full_reply)
+        if safety_hit:
+            # Emit the disclaimer as an additional text_delta
+            disclaimer_suffix = filtered_reply[len(full_reply):]
+            yield _sse_event({
+                "type":    "text_delta",
+                "content": disclaimer_suffix
+            })
+            full_reply = filtered_reply
+
+    # ── Step 9: Suggestion chips (parallel, non-blocking) ────────────
+    chips = await generate_suggestion_chips(
+        user_message    = user_message,
+        assistant_reply = full_reply,
+        intent          = intent_result.intent,
+    )
+    yield _sse_event({"type": "suggestion_chips", "chips": chips})
+
+    # ── Step 10: Persist history ──────────────────────────────────────
+    # Use original messages list (not augmented — don't persist intent hints)
+    if full_reply:
+        messages.append({"role": "assistant", "content": full_reply})
+    await save_history(user_id, session_id, messages)
+
+    # ── Step 11: Observability log ────────────────────────────────────
+    latency_ms = int(time.time() * 1000) - turn_start_ms
+    logger.info(
+        f"[DermAI] Turn complete | "
+        f"rounds={tool_rounds} | "
+        f"tools={tools_called} | "
+        f"safety={safety_hit} | "
+        f"latency={latency_ms}ms | "
+        f"reply_len={len(full_reply)}"
+    )
+
+    # ── Step 12: Done — always emitted ───────────────────────────────
+    yield _sse_event({"type": "done"})
 
 
 # =====================================================================
-# 7. FASTAPI ROUTER
+# 13. FASTAPI ROUTER
 # =====================================================================
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -935,7 +1444,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 @router.post("/message")
 async def chat_message(
-    body: ChatMessageRequest,
+    body:    ChatMessageRequest,
     payload: dict = Depends(verify_token),
 ) -> StreamingResponse:
     """
@@ -955,16 +1464,16 @@ async def chat_message(
 
     return StreamingResponse(
         stream_chat_response(
-            user_id=user_id,
-            session_id=body.session_id,
-            user_message=body.message,
-            location=body.location,
-            image_id=body.image_id,
+            user_id      = user_id,
+            session_id   = body.session_id,
+            user_message = body.message,
+            location     = body.location,
+            image_id     = body.image_id,
         ),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
+            "Cache-Control":    "no-cache",
+            "Connection":       "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
@@ -973,7 +1482,7 @@ async def chat_message(
 @router.get("/history/{session_id}")
 async def get_chat_history(
     session_id: str,
-    payload: dict = Depends(verify_token),
+    payload:    dict = Depends(verify_token),
 ) -> dict[str, Any]:
     """Returns full message history for a session."""
     user_id: str = payload["sub"]
@@ -989,7 +1498,7 @@ async def get_chat_history(
 @router.delete("/session/{session_id}")
 async def clear_session(
     session_id: str,
-    payload: dict = Depends(verify_token),
+    payload:    dict = Depends(verify_token),
 ) -> dict[str, str]:
     """Clears a Redis/in-memory chat session."""
     user_id: str = payload["sub"]
@@ -1004,6 +1513,34 @@ async def get_sessions(
     payload: dict = Depends(verify_token),
 ) -> dict[str, Any]:
     """Returns list of session IDs for the authenticated user."""
-    user_id: str = payload["sub"]
-    session_ids = await list_sessions(user_id)
+    user_id: str    = payload["sub"]
+    session_ids     = await list_sessions(user_id)
     return {"user_id": user_id, "sessions": session_ids}
+
+
+@router.get("/session/{session_id}/metadata")
+async def get_session_metadata(
+    session_id: str,
+    payload:    dict = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Returns lightweight session metadata without full message content.
+    Used by frontend to show session info in sidebar.
+    """
+    user_id: str = payload["sub"]
+    history = await load_history(user_id, session_id)
+
+    user_msgs      = [m for m in history if m.get("role") == "user"]
+    assistant_msgs = [m for m in history if m.get("role") == "assistant"]
+
+    # Extract first user message as session title (truncated)
+    first_msg = user_msgs[0].get("content", "") if user_msgs else ""
+    title     = first_msg[:60] + "..." if len(first_msg) > 60 else first_msg
+
+    return {
+        "session_id":    session_id,
+        "title":         title or "New conversation",
+        "turn_count":    len(user_msgs),
+        "message_count": len([m for m in history if m.get("role") != "system"]),
+        "has_history":   len(user_msgs) > 0,
+    }
