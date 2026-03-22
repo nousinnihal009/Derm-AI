@@ -2,7 +2,7 @@
  * api.ts — Centralized API client for SkinCare AI
  */
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://localhost:8000';
 
 async function apiRequest(endpoint: string, options: RequestInit = {}) {
   const res = await fetch(`${API_BASE}${endpoint}`, {
