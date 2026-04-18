@@ -48,8 +48,8 @@ load_dotenv()
 logger = logging.getLogger("dermai.chatbot")
 
 # ── Model config ──────────────────────────────────────────────────────
-GEMINI_PRO_MODEL   = "gemini-pro-latest"      # main agent — best reasoning
-GEMINI_FLASH_MODEL = "gemini-flash-latest"    # chips + intent — fast/cheap
+GEMINI_PRO_MODEL    = "gemini-1.5-pro"      # main agent — best reasoning
+GEMINI_FLASH_MODEL  = "gemini-1.5-flash"    # chips + intent — fast/cheap
 
 # ── Timeouts ──────────────────────────────────────────────────────────
 AGENT_TIMEOUT_S  = 45.0   # main agent stream (pro model is slower)
@@ -92,8 +92,8 @@ if _GEMINI_KEY:
         _probe_model = genai.GenerativeModel(GEMINI_FLASH_MODEL)
         logger.info("[DermAI] Gemini SDK initialized — key verified")
         _GEMINI_READY = True
-    except Exception as _init_err:
-        logger.error(f"[DermAI] Gemini initialization failed: {_init_err}")
+    except Exception as e:
+        logger.error(f"[DermAI] Gemini initialization failed: {e}")
 else:
     logger.error(
         "[DermAI] GEMINI_API_KEY not set — all chat requests will fail gracefully"
@@ -232,8 +232,6 @@ def _rate_key(user_id: str) -> str:
     return f"dermai:rate:{user_id}"
 
 
-HISTORY_TTL_SECONDS = HISTORY_TTL_S
-MAX_PAIRS           = MAX_PAIRS  # already defined above, re-bind for readability
 
 
 async def _redis_available() -> bool:
@@ -272,9 +270,9 @@ async def save_history(
     key = _chat_key(user_id, session_id)
     if await _redis_available():
         assert _redis_pool is not None
-        await _redis_pool.set(key, json.dumps(trimmed), ex=HISTORY_TTL_SECONDS)
+        await _redis_pool.set(key, json.dumps(trimmed), ex=HISTORY_TTL_S)
         await _redis_pool.sadd(_sessions_key(user_id), session_id)
-        await _redis_pool.expire(_sessions_key(user_id), HISTORY_TTL_SECONDS)
+        await _redis_pool.expire(_sessions_key(user_id), HISTORY_TTL_S)
     else:
         _in_memory_store[key] = trimmed
         _in_memory_sessions.setdefault(user_id, set()).add(session_id)
