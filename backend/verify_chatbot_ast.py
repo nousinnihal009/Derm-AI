@@ -34,6 +34,10 @@ all_names = {node.name for node in ast.walk(tree)
 all_names |= {node.targets[0].id for node in ast.walk(tree)
               if isinstance(node, ast.Assign) and node.targets
               and isinstance(node.targets[0], ast.Name)}
+# Also capture type-annotated assignments (e.g., GEMINI_TOOLS: list[Tool] = ...)
+all_names |= {node.target.id for node in ast.walk(tree)
+              if isinstance(node, ast.AnnAssign)
+              and isinstance(node.target, ast.Name)}
 
 for name in required_names:
     checks[f"'{name}' defined"] = name in all_names
